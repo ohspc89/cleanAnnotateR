@@ -192,3 +192,11 @@ qc.all = function(path){
                 'continuously_coded'=continuously_coded,
                 'proper_labels'=labels_properly_formed))
 }
+
+# (10/7/25) Utility function to handle an edge case
+make.proper.dataframe = function(vector){
+    # If a 1-by-n vector, transpose first, then make a dataframe.
+    if (is.null(dim(vector)))
+        return(data.frame(t(vector)))
+    # If not, just return a plain dataframe.
+    return(data.frame(vector))

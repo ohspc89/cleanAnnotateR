@@ -26,21 +26,36 @@ colnames = c('ID', 'Coder',
              paste0('M2', paste0('A', 2:7)),
              paste0('M3', paste0('A', 2:7)),
              paste0('M4', paste0('A', 2:7)),
-             paste0('M5', paste0('A', 2:7)))
+             paste0('M5', paste0('A', 2:7)),
+             paste0('M6', paste0('A', 2:7)),
+             paste0('M7', paste0('A', 2*:7)))
 
 # make sure that the A2-A7 are lined up on the left hand side of the excel file sheet- EGM
 
-# path shall be updated - to reflect the actual path
-HOME = fs::path_home()
-# Mac_OneDrive = 'Library/CloudStorage/OneDrive-SharedLibraries-ChildrensHospitalLosAngeles/Smith, Beth - Reach & Grasp'
-Mac_OneDrive = 'Library/CloudStorage/OneDrive-ChildrensHospitalLosAngeles/EEG Reaching R01/Analysis/Behaviour Coding/Reach & Grasp'
-excel_file = 'Reach_Assignments_2.xlsx'
+####################################
+# Cross-platform operation enabled #
+####################################
 
-onedrive_path = file.path(HOME, Mac_OneDrive, excel_file)
+# DO NOT CHANGE LINES BELOW:
+# -------------------------------------
+os.name <- Sys.info()["sysname"]
+HOME <- fs::path_home()
+EXCEL_FILE <- "Reach_Assignments_2.xlsx"
+# -------------------------------------
+
+# `onedrive_path` will change... adapt based on the OneDrive folder synced on your computer.
+# (10/7/27) Just matching with what EGM/JC works
+# -------------------------------------
+onedrive_path <- "Library/CloudStorage/OneDrive-ChildrensHospitalLosAngeles/EEG reaching R01/Analysis/Behavior Coding"
+if (os.name == "Windows")
+    onedrive_path <- "Childrens Hospital Los Angeles/Smith, Beth - EEG reaching R01/Analysis/Behavior Coding"
+# -------------------------------------
+
+filepath = file.path(HOME, onedrive_path, EXCEL_FILE)
 
 # sheet='CC'
-if (!file.exists(onedrive_path)){
-    stop("Error: Excel file not found at: ", onedrive_path)
+if (!file.exists(filepath)){
+    stop("Error: Excel file not found at: ", filepath)
 }
 # [JO] 'record' has 81 rows and 68 columns (check with `dim(record)`)
 record = read_excel(onedrive_path, sheet='Coding_Assignments', skip=1)
@@ -101,6 +116,7 @@ for (i in 1:dim(m345)[1]){
             # You could still include 'Data' and `subjstr` when you define
             # `pathstr` - then you don't include 'Data' in `Mac_OneDrive_Path`
             # at line 41 of perform_qc.R. Just saying!
+            # (10/7/25) EGM is using the commented line below
             # `pathstr = file.path('Data', subjstr, paste0(subjstr, "_", monstr))`
             pathstr = file.path(subjstr,
                                 paste0(subjstr, "_", monstr))
