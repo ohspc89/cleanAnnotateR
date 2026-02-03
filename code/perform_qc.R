@@ -11,9 +11,15 @@
 #   3) qc_functions.R is in the same folder as this script
 
 # (10/7/25) Implementing cross-platform operation + independent code execution.
+# (1/20/26) Brushed up the code: troubleshooting
+
+# An elegant way to install packages
+if (!(requireNamespace("Require", quietly = TRUE))) install.packages("Require")
+package_list = c('fs', 'stringr', 'purrr')
+Require::Require(package_list, require=T)
 
 # Save the current working directory FIRST in case you need to revisit
-your_wkdir = getwd()
+your_wkdir <- getwd()
 
 ################
 # PATH details #
@@ -23,39 +29,64 @@ os.name <- Sys.info()["sysname"]
 # User's HOME directory (ex. /Users/joh)
 HOME = path_home()
 
+# The function in fetch_ids.R...
+find_folder <- function(pattern, start="C:/Users", exact.match=TRUE, is.recursive=FALSE) {
+    paths <- list.dirs(start, recursive=is.recursive, full.names=TRUE)
+    # If 'partial', filter with partial matching.
+    if (exact.match)
+        hits <- paths[basename(paths) == pattern]
+    else
+        hits <- paths[grepl(pattern, paths, ignore.case=T)]
+
+    return(hits)
+}
+
 # Noticed that EGM is coming one directory up (previously '/Data' was at the end)
-OneDrive_PATH <- 'Library/CloudStorage/OneDrive-ChildrensHospitalLosAngeles/EEG reaching R01/Analysis/Behavior Coding/Reach & Grasp'
-if (os.name == "Windows")
-    OneDrive_PATH <- 'Childrens Hospital Los Angeles/Smith, Beth - EEG reaching R01/Analysis/Behavior Coding/Reach & Grasp'
+# ------------------------------
+synced_sharepoint <- find_folder("ChildrensHospitalLosAngeles",
+                                 paste0(HOME, "/Library/CloudStorage"),
+                                 exact.match=F)
+# If it returns an error, check if `synced_sharepoint[1]` contains 'OneDrive-ChildrensHospitalLosAngeles'
+# Also, please ensure that you always sync 'Behavior Coding' folder
+# on your local machine...
+onedrive_path <- file.path(find_folder("Behavior Coding",
+                                       start=synced_sharepoint[1],
+                                       exact.match=F),
+                           "Reach & Grasp")
+if (os.name == "Windows") {
+    synced_sharepoint <- find_folder("CHILDRENS HOSPITAL LOS ANGELES", start=HOME)
+    # 'Reach & Grasp' folder
+    onedrive_path <- file.path(find_folder("Behavior Coding",
+                                           start=synced_sharepoint,
+                                           exact.match=T),
+                               "Reach & Grasp")
+}
 
-# Making sure that this code is also run in the working directory: '/Quality Check'
-# This is because people run the script without downloading it.
-setwd(file.path(HOME, OneDrive_PATH, 'Quality Check'))
-
-# An elegant way to install packages
-if (!(requireNamespace("Require", quietly = TRUE))) install.packages("Require")
-package_list = c('fs', 'stringr', 'purrr')
-Require::Require(package_list, require=T)
+# `perform_qc.R` and `qc_functions.R` should be in '/Reach & Grasp/Quality Check'.
+qc_files_path = file.path(onedrive_path, 'Quality Check')
+processed_path = file.path(onedrive_path, 'processed')
 
 # This will return error if you did not complete 2) above.
 # [JO] Folder naming nomenclature changed - 'path' column will have
 # many duplicates.
-references = read.csv('../processed/reference.tsv', sep='\t')
+reference_path = file.path(processed_path, 'reference.tsv')
+if (!file.exists(reference_path))
+    stop("Error: Excel file not found at: ", reference_path)
+
+references <- read.csv(reference_path, sep='\t')
 # Some problematic folders rejected for now (March 5, 2025)
-subdirs_temp = references$path
-idx_spare = !grepl("Data/TD27/TD27M3", subdirs_temp)
+subdirs_temp <- references$path
+idx_spare <- !grepl("Data/TD27/TD27M3", subdirs_temp)
+
 # [JO] Remove duplicates using `unique`
-subdirs = unique(subdirs_temp[idx_spare])
-# [JO] No longer in use - because folder naming nomenclature changed
-# prefixes_temp = references$prefix
-# prefixes = prefixes_temp[idx_spare]
+subdirs <- unique(subdirs_temp[idx_spare])
 
 # You also need to load this R script to use functions I wrote.
-source('qc_functions.R')
+source(file.path(qc_files_path, 'qc_functions.R'))
 
 # paths to .txt files
 # ex) /Users/joh/Library/.../Data/TD17/TD17_M3
-txtpaths = file.path(HOME, OneDrive_PATH, subdirs)
+txtpaths <- file.path(onedrive_path, subdirs)
 
 # [JO] Previous lines wouldn't work, because file/folder names have changed
 # since I first wrote this script. These two lines should work.
@@ -67,6 +98,8 @@ txtpaths = file.path(HOME, OneDrive_PATH, subdirs)
 # EGM commented the two lines above and replaced with her new lines here:
 # She added them to avoid checking out folders that are not available.
 existing_txtpaths <- txtpaths[dir.exists(txtpaths)]
+
+# Warn about missing directories
 missing_txtpaths <- txtpaths[!dir.exists(txtpaths)]
 # More EGM edits
 if (length(missing_txtpaths) > 0){
@@ -83,9 +116,19 @@ txt_files <- files[str_detect(files, "\\.txt$")]
 # There can be different ways to report the quality check output.
 # 1. You can create a long .log file.
 #    Use `sink()` to log everything to a log file.
-failed_files = character(0)
+# (1/20/26) Stopped using relative paths.
+summary_log_path <- file.path(processed_path, 'quality_check_summary.log')
+failed_log_path <- file.path(processed_path, 'failed_files.tsv')
+sink(summary_log_path, append=TRUE, split=FALSE)
 
-sink('../processed/quality_check_summary.log', append=TRUE, split=FALSE)
+# Initialize a data frame for structured error logging
+failed_log <- data.frame(
+        file=character(),
+        error=character(),
+        timestamp=character(),
+        stringsAsFactor=FALSE
+        )
+
 for (txt in txt_files){
     print(tail(str_split(txt, '/')[[1]], 1))
     # Logging improved - ChatGPT recommendation
@@ -94,18 +137,22 @@ for (txt in txt_files){
         qc.all(txt)
     }, error = function(e) {
         warning("Error processing:", txt, "; ", conditionMessage(e))
-        assign("failed_files", c(failed_files, txt), envir=.GlobalEnv)
+        # Save structured info (`<<-`: super-assign)
+        failed_log <<- rbind(failed_log,
+                             data.frame(file=txt, error=conditionMessage(e),
+                                        timextamp=format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                                        stringsAsFactors=FALSE))
         return(NULL)
     })
     if (!is.null(result)) print(result)
 }
 sink()
 
-writeLines(failed_files, '../processed/failed_files.log')
+write.csv(filaed_log, failed_log_path, row.names=FALSE)
 
 # 2. You can prepare separate output files for the three types of check
 #    This will be done not on failed files
-successful_files = txt_files[!txt_files %in% failed_files]
+successful_files = txt_files[!txt_files %in% failed_log$file]
 
 # Will save .txt filename if the last_offsets are not unique.
 # ('$last_offsets_match' is FALSE)
@@ -181,14 +228,14 @@ proper_issue = proper_issue[-1, ]
 # Convert matrices into data frames
 # so that we can have the columns named.
 lastoffset = data.frame(filename=offset_issue)
-write.table(lastoffset, '../processed/qc_offset.tsv', sep='\t',
-            row.names=F, col.names=T, quote=F)
+write.table(lastoffset, file.path(processed_path, 'qc_offset.tsv'),
+            sep='\t', row.names=F, col.names=T, quote=F)
 continuous = make.proper.dataframe(cont_issue)
 colnames(continuous) = c('filename', 'tier', 'rows',
                          'prev_value', 'next_value')
-write.table(continuous, '../processed/qc_continuous.tsv', sep='\t',
-            row.names=F, col.names=T, quote=F)
+write.table(continuous, file.path(processed_path, 'qc_continuous.tsv'),
+            sep='\t', row.names=F, col.names=T, quote=F)
 properlabels = make.proper.dataframe(proper_issue)
 colnames(properlabels) = c('filename', 'row', 'label')
-write.table(properlabels, '../processed/qc_labels.tsv', sep='\t',
-            row.names=F, col.names=T, quote=F)
+write.table(properlabels, file.path(processed_path, 'qc_labels.tsv'),
+            sep='\t', row.names=F, col.names=T, quote=F)

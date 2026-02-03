@@ -1,3 +1,11 @@
+# fetch_ids.R is prepared to list up files for quality check
+# using a reference table: `Reach_Assignments_2.xlsx`.
+# It will output a file: `reference.tsv`
+# This script should be run before running `perform_qc.R`.
+
+# last time manipulated by EGM on 7/25/2025
+# JO edited on 1/20/2026
+
 ##########################
 # Packages: install/load #
 ##########################
@@ -43,15 +51,38 @@ HOME <- fs::path_home()
 EXCEL_FILE <- "Reach_Assignments_2.xlsx"
 # -------------------------------------
 
-# `onedrive_path` will change... adapt based on the OneDrive folder synced on your computer.
-# (10/7/27) Just matching with what EGM/JC works
+# Windows helper function
+find_folder <- function(pattern, start="C:/Users", exact.match=TRUE, is.recursive=FALSE) {
+    paths <- list.dirs(start, recursive=is.recursive, full.names=TRUE)
+    # If 'partial', filter with partial matching
+    if (exact.match)
+        hits <- paths[basename(paths) == pattern]
+    else
+        hits <- paths[grepl(pattern, paths, ignore.case=T)]
+
+    return(hits)
+}
+
+# `onedrive_path` needs to be defined based on which OneDrive folder you sync on your computer.
+# I assume people will be syncing 'Behavior Coding' folder.
 # -------------------------------------
-onedrive_path <- "Library/CloudStorage/OneDrive-ChildrensHospitalLosAngeles/EEG reaching R01/Analysis/Behavior Coding"
-if (os.name == "Windows")
-    onedrive_path <- "Childrens Hospital Los Angeles/Smith, Beth - EEG reaching R01/Analysis/Behavior Coding"
+synced_sharepoint <- find_folder("ChildrensHospitalLosAngeles",
+                                 paste0(HOME, "/Library/CloudStorage"),
+                                 exact.match=F)
+# If it returns you an error, just check if
+# `synced_sharepoint[1]` contains 'OneDrive-ChildrensHospitalLosAngeles'
+onedrive_path <- find_folder("Behavior Coding",
+                             start=synced_sharepoint[1],
+                             exact.match=F)
+if (os.name == "Windows"){
+    synced_sharepoint <- find_folder("CHILDRENS HOSPITAL LOS ANGELS", start=HOME)
+    # folder: 'Behavior Coding'
+    onedrive_path <- find_folder("Behavior Coding",
+                                 start=synced_sharepoint,
+                                 exact.match=F)
 # -------------------------------------
 
-filepath = file.path(HOME, onedrive_path, EXCEL_FILE)
+filepath <- file.path(onedrive_path, EXCEL_FILE)
 
 # sheet='CC'
 if (!file.exists(filepath)){
@@ -144,46 +175,19 @@ tab = data.frame(subj=subj,
                  prefix=prefixes,
                  path=paths)
 
+# Save the refernce to a tab separated file
+# (1/20/26) Describing the path:
+# |- onedrive_path ('Behavior Coding')
+# |  |- Reach & Grasp
+# |  |  |- Quality Check
+# |  |  |  |- R scripts (ex. fetch_ids.R)
+# |  |  |- processed
+# |  |  |  |- output of R scripts (ex. reference.tsv)
+# |  |  |- Data
+# |  |  |  |- Coded data
+
 # save the reference to a tab separated file
-write.table(tab, file='../processed/reference.tsv', sep= "\t",
+reference_path = file.path(onedrive_path, "Reach & Grasp/processed/reference.tsv")
+write.table(tab, file=reference_path, sep= "\t",
             row.names=F, col.names=T,
             quote=F)
-
-# your referece.tsv file will be put in one folder below the directory that is listed above - ask Jin why this happens? 
-# [JO] One folder below? I am not sure what you mean...
-# Right now it is assumed that 'reference.tsv' will be saved
-# in the 'processed' folder, that's one level up from where you
-# run the code ('..' means parent directory, or one level up).
-# To add a little more... this is related to how I structured things.
-
-# folder    | content
-# --------------------
-# codes     | R codes
-# processed | code output
-# docs      | relevant documents
-
-# Folder structure was as follows:
-
-# NEUR490
-# |-- code                  << this is the working directory I worked in
-# |   |-- fetch_ids.R
-# |   |-- perform_qc.R
-# |   |-- qc_functions.R
-# |-- processed
-# |-- docs
-# |   |-- pdf/json files
-
-# When my working directory is 'code', one level up is 'NEUR490'.
-# '../processed/reference.tsv' == 'NEUR490/processed/reference.tsv'
-
-# I also explained in 'Adapting_the_code.pdf'
-# One note I missed was that you need to have "processed" folder created
-# before running the last line, or you will get an error.
-
-
-#Notes for code
-#in order to see exactly which rows your script is pikcing up run
-#print(head(m345, 3)) 
-#in the directoy - it will output what the script is picking up - you can change the 3 to add more rows.
-
-#last time manipulated by EGM on 7/25/2025
