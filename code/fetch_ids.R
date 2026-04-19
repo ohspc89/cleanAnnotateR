@@ -1,193 +1,182 @@
-# fetch_ids.R is prepared to list up files for quality check
-# using a reference table: `Reach_Assignments_2.xlsx`.
-# It will output a file: `reference.tsv`
-# This script should be run before running `perform_qc.R`.
+#' Build Reference Table for Reach & Grasp Coding Video Anootations
+#'
+#' This script reads an Excel workbook with a two-row header that encodes
+#' months and activities (e.g., \code{M3} and \code{A2}) for each subject,
+#' identifies selected assignments (cells marked with \code{1}),
+#' and produces a tab-separated reference table with subject, month, activity,
+#' filename prefix, and target path. The output is written to the synchronized
+#' OneDrive/SharePoint "Behavior Coding" folder under
+#' \code{"Reach & Grasp/processed/reference.tsv"}.
+#'
+#' @section Inputs:
+#' \itemize{
+#'   \item \strong{Excel file} (default: \code{"Reach_Assignments_2.xlsx"}), located in the
+#'         OneDrive "Behavior Coding" folder. The name can be changed by editing
+#'         \code{EXCEL_FILE}.
+#'   \item \strong{Sheet name} (default: \code{"Coding_Assignments"}). Can be changed via
+#'         \code{SHEET_NAME}.
+#'   \item Row 1 contains merged month labels (e.g., \code{"Month 3 (M3)"}).
+#'         Row 2 contains activity codes as \code{"A#"} (e.g., \code{"A2"}).
+#'   \item Data rows begin at row 2 (after headers), where column 1 is \code{ID}
+#'         (e.g., \code{"TD17"}) and activity columns contain selection flags
+#'         (numeric \code{1}).
+#' }
+#'
+#' @section Outputs:
+#' A tab-separated file \code{reference.tsv} with the columns:
+#' \describe{
+#'   \item{subj}{Subject ID (e.g., \code{"TD17"}).}
+#'   \item{month}{Month tag (e.g., \code{"M3"}, \code{"M7"}).}
+#'   \item{act}{Activity tag (e.g., \code{"A2"}, \code{"A7"}).}
+#'   \item{prefix}{Filename prefix of the form \code{<ID>-<M#>_<A#>} (e.g., \code{"TD17-M3_A2"}).}
+#'   \item{path}{Target relative path (e.g., \code{"Data/TD17/TD17_M3"}).}
+#' }
+#'
+#' @author
+#' Maintainer: Jinseok Oh <joh@chla.usc.edu>
+#' Last edited: 2/21/2026
 
-# last time manipulated by EGM on 7/25/2025
-# JO edited on 1/20/2026
-
-##########################
-# Packages: install/load #
-##########################
-# Require: Installing and Loading R packages for Reproducible Workflows
-# stringr: play a big role in many data cleaning and prep tasks
-# readxl: makes it easy to get data out of Excel
-
-# These lines are to load packages and install if necessary.
-# Do not worry if you dont' understand.
+# Don't forget to install tidyr and dplyr in people's computers...
 if (!requireNamespace("Require", quietly = T)) install.packages("Require")
-package_list = c('readxl', 'stringr', 'fs')
+package_list = c('readxl', 'stringr', 'fs', 'tidyr', 'dplyr', 'here')
 Require::Require(package_list, require=T, cranCache=T)
 
-################################
-# Reading xlsx file:           #
-#   - Reach_Assignments_2.xlsx #
-################################
+# Settings
+# -----------------------------------------
+EXCEL_FILE = "Reach_Assignments_2.xlsx"
+SHEET_NAME = "Coding_Assignments"
+# -----------------------------------------
 
-# [JO] Column names of the excel sheet:
-#            |    Month 1 (M1)    |    Month 2 (M2)    |
-# ------------------------------------------------------
-# ID | Coder | A2 | A3 | ... | A7 | A2 | A3 | ... | A7 | << `colnames`
-# As 'A2', 'A3', ..., belong to a month (ex. 'M1'), make each 'A@' -> 'M@A@'
-colnames = c('ID', 'Coder',
-             paste0('M1', paste0('A', 2:7)),
-             paste0('M2', paste0('A', 2:7)),
-             paste0('M3', paste0('A', 2:7)),
-             paste0('M4', paste0('A', 2:7)),
-             paste0('M5', paste0('A', 2:7)),
-             paste0('M6', paste0('A', 2:7)),
-             paste0('M7', paste0('A', 2*:7)))
+# (4/17/26) Using `here` package to find the top-level directory of your PROJECT,
+# regardless of the computer or OS.
+here::i_am("qc_project.Rproj")
 
-# make sure that the A2-A7 are lined up on the left hand side of the excel file sheet- EGM
+# -----------------------------------------
 
-####################################
-# Cross-platform operation enabled #
-####################################
+# This will make the full file path
+filepath <- file.path(dirname(dirname(here())), EXCEL_FILE)
 
-# DO NOT CHANGE LINES BELOW:
-# -------------------------------------
-os.name <- Sys.info()["sysname"]
-HOME <- fs::path_home()
-EXCEL_FILE <- "Reach_Assignments_2.xlsx"
-# -------------------------------------
-
-# Windows helper function
-find_folder <- function(pattern, start="C:/Users", exact.match=TRUE, is.recursive=FALSE) {
-    paths <- list.dirs(start, recursive=is.recursive, full.names=TRUE)
-    # If 'partial', filter with partial matching
-    if (exact.match)
-        hits <- paths[basename(paths) == pattern]
-    else
-        hits <- paths[grepl(pattern, paths, ignore.case=T)]
-
-    return(hits)
-}
-
-# `onedrive_path` needs to be defined based on which OneDrive folder you sync on your computer.
-# I assume people will be syncing 'Behavior Coding' folder.
-# -------------------------------------
-synced_sharepoint <- find_folder("ChildrensHospitalLosAngeles",
-                                 paste0(HOME, "/Library/CloudStorage"),
-                                 exact.match=F)
-# If it returns you an error, just check if
-# `synced_sharepoint[1]` contains 'OneDrive-ChildrensHospitalLosAngeles'
-onedrive_path <- find_folder("Behavior Coding",
-                             start=synced_sharepoint[1],
-                             exact.match=F)
-if (os.name == "Windows"){
-    synced_sharepoint <- find_folder("CHILDRENS HOSPITAL LOS ANGELS", start=HOME)
-    # folder: 'Behavior Coding'
-    onedrive_path <- find_folder("Behavior Coding",
-                                 start=synced_sharepoint,
-                                 exact.match=F)
-# -------------------------------------
-
-filepath <- file.path(onedrive_path, EXCEL_FILE)
-
-# sheet='CC'
 if (!file.exists(filepath)){
     stop("Error: Excel file not found at: ", filepath)
 }
-# [JO] 'record' has 81 rows and 68 columns (check with `dim(record)`)
-record = read_excel(onedrive_path, sheet='Coding_Assignments', skip=1)
-# [JO] This may not work as intended, because 'colnames' is a vector
-# whose length is 32 (check with `length(colnames)`).
-# What may happen to the remaining 36 columns?
-# This will make the names of those columns 'NA'
-colnames(record) = colnames
+
+# Read from the spreadsheet: Coding_Assignments_2.xlsx
+month_tbl <- {
+    if (!SHEET_NAME %in% readxl::excel_sheets(filepath)) {
+        stop("Sheet '", SHEET_NAME, "' not found in: ", filepath)
+    }
+    # 1. Read the header rows (1 & 2) separately to build names (months + activities)
+    hdr <- read_excel(filepath, sheet=SHEET_NAME,
+                      range=readxl::cell_limits(c(1,1), c(2,NA)),
+                      col_names=FALSE)
+
+    row1 <- hdr[1, ] |> as.character()
+    row2 <- hdr[2, ] |> as.character()
+
+    # Treat empty strings as NA <- this necessary?
+    row1[row1 == ""] <- NA
+    row2[row2 == ""] <- NA
+
+    # Forward-fill the Month header across merged cells
+    month_header <- tibble(val=row1) |>
+        fill(val, .direction = "down") |>
+        pull(val)
+
+    # Expect either "M3", "M10" or labels like "Month 3", "Month 10"
+    month_tag <- str_extract(month_header, "M\\d+") %>%
+        ifelse(
+            is.na(.),
+            paste0("M", str_extract(month_header, "(?<=Month )\\d+")),
+            .
+        )
+
+    # Identify activity columns: those with A#, under a month
+    is_activity <- str_detect(row2, "^A\\d+$") & !is.na(month_tag)
+
+    keep_idx <- which(is_activity)
+    new_names <- paste0(month_tag[keep_idx], row2[keep_idx])
+
+    # 2. Read the actual data rows
+    # Use col_types to force columns to be numeric/double where needed
+    # Column 1 is ID (text), the rest are activities (numeric)
+
+    dat <- read_excel(filepath, sheet=SHEET_NAME, skip=2)
+
+    # Build final dataset
+    out <- dat[, c(1, keep_idx)]
+    names(out) <- c("ID", new_names)
+    # Reject rows without valid IDs
+    out <- out[!is.na(out$ID), ]
+    out <- out %>%
+        mutate(across(-ID, ~ readr::parse_number(as.character(.))))
+}
 
 #############################################
 # Data Wrangling:                           #
 #   - actual information extraction happens #
 #############################################
 
-# M3, M4 entries - S:X, Z:AE, or 19:24, 25:31 - old reach sheet
-# M3, M4 entries - Q:V, X:AC, AE:AJ, OR 14:22, 24:29, 31:36, for reach_assignments sheet
-m345 = record[,c(1, 15:20, 21:27, 28:33)]
-m345colnames = colnames(m345)
+# Reference table will have the following columns:
+#   - ID (chr; ex. TD02)
+#   - combined (chr; ex. M1A2)
+#   - status (dbl - 0, 1, or NA; if 1, coder marked the video to have been coded)
+#   - month (chr; ex. M1)
+#   - act (chr; ex. A2)
+#   - prefix (chr; ex. TD02-M1_A2)
+#   - path (chr; ex. Data/TD02/TD02_M1)
+tab <- month_tbl %>%
+    pivot_longer(cols = -ID, names_to = "combined", values_to = "status") %>%
+    filter(status == "1") %>%
+    mutate(
+           month = str_extract(combined, "M\\d+"),
+           act = str_extract(combined, "A\\d+"),
+           prefix = paste0(ID, "-", month, "_", act),
+           path = file.path("Data", ID, paste0(ID, "_", month))
+           )
 
-subj = vector()     # ex. TD17
-months = vector()   # ex. M3
-acts = vector()     # ex. A4
-prefixes = vector() # ex. TD17-M3_A4
-                    # full filename ex: TD17-M3_A4R3_CC.txt
-paths = vector()    # ex. TD17/TD17_M3
-# [JO] The conditional (i.e. `row[j] %in% c('1')`) returned TRUE
-# because of R's type coercion behavior.
-# In other programming languages this may return an error, because
-# the value of row[j] is double ('dbl'), not character ('chr')
-# `row[j] %in% c('1')` translates to:
-#   "Check if 'row[j]' matches any element of a vector in the right-hand side.
-#    Oh, and if data types don't match, coerce the numeric value to
-#    a character string."
-# Previously I used the grammer (`%in%`) because the mark indicating
-# completion was a character ('x' or 'X'). Given that the code has changed,
-# consider replacing '1' with 1 (I already changed it).
-for (i in 1:dim(m345)[1]){
-    row = m345[i,]       # `row` is a tibble
-    for (j in 2:length(row)){
-        if (row[j] %in% c(1)){
-            subjstr = row[1]$ID
-            # `stringr::str_split()` splits a string into pieces
-            temp = str_split(m345colnames[j], "")[[1]]
-            # `stringr::str_c()` joins multiple strings into one
-            monstr = str_c(temp[1], temp[2])
-            astr = str_c(temp[3], temp[4])
-            txtstr = str_c(subjstr, '-',
-                           monstr, '_',
-                           astr)
-            # `stringr::str_c()` is very similar to `paste0()`
-            # so you can join strings in the following way.
-            # [EGM] this is 3 folders deep
-            # pathstr = file.path('Data', subjstr,
-            #                     paste0(subjstr, monstr),
-            #                     paste0(subjstr, monstr, astr))
-            # [JO] I noticed that folder names changed (ex. TD37M3 -> TD37_M3)
-            # and all activities are saved in the same month folder.
-            # You could still include 'Data' and `subjstr` when you define
-            # `pathstr` - then you don't include 'Data' in `Mac_OneDrive_Path`
-            # at line 41 of perform_qc.R. Just saying!
-            # (10/7/25) EGM is using the commented line below
-            # `pathstr = file.path('Data', subjstr, paste0(subjstr, "_", monstr))`
-            pathstr = file.path(subjstr,
-                                paste0(subjstr, "_", monstr))
-
-            # add items to vectors
-            subj = c(subj, subjstr)
-            months = c(months, monstr)
-            acts = c(acts, astr)
-            prefixes = c(prefixes, txtstr)
-            paths = c(paths, pathstr)
-        }
-    }
-}
-
-# Reference table looks like...
-# +------+-------+-----+------------+---------------+
-# | subj | month | act | prefix     | path          |
-# |------|-------|-----|------------|---------------|
-# | TD17 | M3    | A2  | TD17-M3_A2 | TD17/TD17_M3  |
-# |------|-------|-----|------------|---------------|
-# | ...  | ...   | ... | ...        | ...           |
-tab = data.frame(subj=subj,
-                 month=months,
-                 act=acts,
-                 prefix=prefixes,
-                 path=paths)
-
-# Save the refernce to a tab separated file
-# (1/20/26) Describing the path:
-# |- onedrive_path ('Behavior Coding')
+# save the reference to a tab separated file
+# (1/20/26) Describing the path..
+# |- onedrive_path
 # |  |- Reach & Grasp
 # |  |  |- Quality Check
 # |  |  |  |- R scripts (ex. fetch_ids.R)
 # |  |  |- processed
-# |  |  |  |- output of R scripts (ex. reference.tsv)
+# |  |  |  |- R script processed output (ex. reference.tsv)
 # |  |  |- Data
 # |  |  |  |- Coded data
+reference_path = file.path(dirname(here()), "processed/reference.tsv")
+qc_state_dir   = file.path(dirname(here()), "processed/qc_state")
+dir.create(qc_state_dir, showWarnings=FALSE, recursive=TRUE)
 
-# save the reference to a tab separated file
-reference_path = file.path(onedrive_path, "Reach & Grasp/processed/reference.tsv")
-write.table(tab, file=reference_path, sep= "\t",
-            row.names=F, col.names=T,
-            quote=F)
+prev_reference_path = file.path(qc_state_dir, "reference_prev.tsv")
+diff_new_path	    = file.path(qc_state_dir, "reference_new.tsv")
+diff_removed_path   = file.path(qc_state_dir, "reference_removed.tsv")
+
+# Load previous reference if exists
+prev <- NULL
+if (file.exists(prev_reference_path)) {
+    prev <- read.delim(prev_reference_path, sep="\t", stringsAsFactors=FALSE)
+}
+
+# Compute diffs (use prefix as unique key)
+if (!is.null(prev) && "prefix" %in% names(prev)){
+    new_rows     <- tab[!(tab$prefix %in% prev$prefix), , drop=FALSE]
+    removed_rows <- prev[!(prev$prefix %in% tab$prefix), , drop=FALSE]
+} else {
+    new_rows <- tab
+    removed_rows <- tab[0, , drop=FALSE]
+}
+
+# Save diff outputs
+write.table(new_rows, file=diff_new_path, sep="\t",
+	    row.names=FALSE, col.names=TRUE, quote=FALSE)
+write.table(removed_rows, file=diff_removed_path, sep="\t",
+	    row.names=FALSE, col.names=TRUE, quote=FALSE)
+
+# Write the current reference (as before)
+write.table(tab, file=reference_path, sep="\t",
+	    row.names=FALSE, col.names=TRUE, quote=FALSE)
+
+# Update snapshot for next run
+write.table(tab, file=prev_reference_path, sep= "\t",
+            row.names=F, col.names=T, quote=F)
