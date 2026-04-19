@@ -9,6 +9,9 @@ This project:
 - Transforms and maps coder annotations to file paths
 - Validates annotation `.txt` files through **three structured quality checks**
 - Outputs detailed logs and `.tsv` summaries for further review
+- Coder-specific report generated inside `qc_by_coder/` folder
+- Identifies *newly* assigned videos since the last run
+  (full review at the first week of a month; incremental review the rest)
 
 ---
 
@@ -34,10 +37,14 @@ cleanAnnotateR/
 ├── code/
 │   ├── fetch_ids.R         # Extract IDs & paths from Excel
 │   ├── perform_qc.R        # Run QC procedures on annotation files
+│   ├── qc_project.Rproj    # R Project (or .here) file to work with `here`
 │   └── qc_functions.R      # Core QC logic
 ├── docs/                   # Related documentation
 │   └── schema/             # Metadata of output .tsv
 ├── processed/              # Output .tsv and log files (gitignored)
+│   ├── qc_state/           # Internal state for tracking new/removed assignments
+│   ├── qc_by_coder/        # Personalized feedback reports for lab volunteers
+│   └── reference.tsv       # The master mapping of subjects to file paths
 └── README.md
 ```
 
@@ -59,13 +66,15 @@ source("code/perform_qc.R")  # Perform all 3 quality checks
 
 ## 📁 Example Output Files
 
-| File Name                      | Description                          |
-|-------------------------------|--------------------------------------|
-| `qc_offset.tsv`               | Files failing the offset match check |
-| `qc_continuous.tsv`           | Rows with onset-offset mismatch      |
-| `qc_labels.tsv`               | Improperly formatted labels          |
-| `quality_check_summary.log`   | Full log of the QC session           |
-| `failed_files.log`            | Files that could not be processed    |
+| File Name                     | Description                           |
+|-------------------------------|---------------------------------------|
+| `qc_offset.tsv`               | Files failing the offset match check  |
+| `qc_continuous.tsv`           | Rows with onset-offset mismatch       |
+| `qc_labels.tsv`               | Improperly formatted labels           |
+| `quality_check_summary.log`   | Full log of the QC session            |
+| `failed_files.tsv`            | Files that could not be processed     |
+| `unexpected_filenames.log`    | File names that are not marked in the |
+|                               | master spreadsheet or have typos      |
 
 ---
 
@@ -99,6 +108,12 @@ This pipeline was developed as part of an NIH-funded research project at **Child
 - Built-in error handling and custom logging
 - Modularized QC functions for reuse and testing
 - Prepares structured reference tables for pipeline-ready downstream use
+
+---
+
+## Tip
+
+Please ensure that OneDrive status icon shows "Synced" before running `fetch_ids.R`. There's a 'Sync Delay' often encountered with OneDrive.
 
 ---
 
