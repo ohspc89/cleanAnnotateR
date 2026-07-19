@@ -25,6 +25,16 @@
 #'   \item \code{qc_functions.R} resides in \code{Reach & Grasp/Quality Check} and defines \code{qc.all()}.
 #' }
 #'
+#' @section QC modes:
+#' Weekly runs are incremental: a file is (re)checked only if its assignment
+#' is new, has never passed QC, or the file was modified after its last
+#' successful QC (a re-uploaded correction). A full QC re-checks everything
+#' in the reference log. Full mode triggers automatically during the week of
+#' the month's first Monday, or on demand:
+#' \code{Rscript perform_qc.R --full} (or \code{Sys.setenv(QC_FULL="1")}
+#' before sourcing in RStudio); \code{--incremental} / \code{QC_FULL=0}
+#' force incremental.
+#'
 #' @section Robustness:
 #' Missing directories are warned and skipped; permission issues during listing
 #' are caught. If \code{failed_files.tsv} is locked by another process, the
@@ -59,30 +69,46 @@ first_monday <- first_day + days((8 - wday(first_day, week_start = 1)) %% 7)
 # Check if today is within that week (Mon-Fri)
 qc_full <- if (today >= first_monday && today <= first_monday + days(4)) 1 else 0
 
-# Prefer qc_state outputs for incremental
+# Manual override: `Rscript perform_qc.R --full` / `--incremental`,
+# or Sys.setenv(QC_FULL="1") / "0" when sourcing from RStudio
+cli_args <- commandArgs(trailingOnly = TRUE)
+if ("--full" %in% cli_args || Sys.getenv("QC_FULL") == "1") qc_full <- 1
+if ("--incremental" %in% cli_args || Sys.getenv("QC_FULL") == "0") qc_full <- 0
+cat("QC mode:", if (qc_full) "FULL" else "INCREMENTAL", "\n")
+
 ref_new <- file.path(qc_state_dir, "reference_new.tsv")
 ref_log <- file.path(qc_state_dir, "reference_log.tsv")
-reference_path <- if (qc_full == 1 && file.exists(ref_log)) ref_log else ref_new
 
-cat("Using reference file:", reference_path, "\n")
-if (!file.exists(reference_path)) {
-  stop("Reference file not found. Run fetch_ids.R first.")
+read_ref <- function(p) {
+  if (file.exists(p)) read.delim(p, sep = "\t", stringsAsFactors = FALSE)
+  else NULL
 }
-# This should be updated and saved as reference_log.tsv later
-references <- read.csv(reference_path, sep = "\t", stringsAsFactors = FALSE)
-
-# Quit if no new video coding output to review
-if (!qc_full && nrow(references) == 0) {
-  cat("No new assignments since last run. Skipping QC. \n")
-  quit(status = 0)
+ref_new_tab <- read_ref(ref_new)
+ref_log_tab <- read_ref(ref_log)
+if (is.null(ref_new_tab) && is.null(ref_log_tab)) {
+  stop("No reference files found in ", qc_state_dir,
+       ". Run fetch_ids.R first.")
 }
 
-run_stamp <- format(now(), "%Y-%m-%d_%H%M%S")
-qc_by_date <- file.path(
-  processed_path,
-  paste0("qc_performed_", run_stamp)
+# Work list = new assignments plus everything already in the log.
+# Per assignment, `check_after` decides which of its files need (re)checking:
+#   NA        -> check unconditionally (new, never passed QC, or full QC)
+#   timestamp -> check only files modified after it (re-uploaded corrections)
+references <- dplyr::bind_rows(
+  ref_new_tab,
+  if (!is.null(ref_log_tab) && !is.null(ref_new_tab)) {
+    ref_log_tab[!(ref_log_tab$prefix %in% ref_new_tab$prefix), , drop = FALSE]
+  } else {
+    ref_log_tab
+  }
 )
-dir.create(qc_by_date, showWarnings = FALSE, recursive = TRUE)
+if (!"last_qc" %in% names(references)) references$last_qc <- NA_character_
+if (!"was_reviewed" %in% names(references)) references$was_reviewed <- FALSE
+references$check_after <- if (qc_full) {
+  NA_character_
+} else {
+  ifelse(references$was_reviewed %in% TRUE, references$last_qc, NA_character_)
+}
 
 # You also need to load this R script to use functions I wrote.
 source(file.path(qc_files_path, "qc_functions.R"))
@@ -93,29 +119,55 @@ source(file.path(qc_files_path, "qc_functions.R"))
 subdirs <- unique(references$path)
 txtpaths <- file.path(dirname(here()), subdirs)
 existing_txtpaths <- txtpaths[dir.exists(txtpaths)]
+missing_txtpaths <- txtpaths[!dir.exists(txtpaths)]
+
+# List .txt files with modification times. Listing does not hydrate
+# OneDrive cloud-only placeholders; only files selected for QC get read.
+txt_info <- existing_txtpaths |>
+  purrr::map(~tryCatch(fs::dir_info(.x, type = "file", glob = "*.txt"),
+                       error = function(e) NULL)) |>
+  dplyr::bind_rows()
+
+# Keep files that belong to an assignment on the work list and are
+# new, never passed QC, or modified since their last successful QC
+if (nrow(txt_info) > 0) {
+  file_prefix <- stringr::str_extract(fs::path_file(txt_info$path),
+                                      "TD\\d+-M\\d+A\\d+")
+  row_idx <- match(file_prefix, references$prefix)
+  # handles both date-only (old logs) and full timestamps
+  check_after <- lubridate::parse_date_time(
+    references$check_after[row_idx],
+    orders = c("Ymd HMS", "Ymd"), tz = Sys.timezone(), quiet = TRUE
+  )
+  needs_qc <- !is.na(row_idx) &
+    (is.na(check_after) | txt_info$modification_time > check_after)
+  txt_files <- as.character(txt_info$path[needs_qc])
+} else {
+  txt_files <- character(0)
+}
+
+if (length(txt_files) == 0 && length(missing_txtpaths) == 0) {
+  cat("Nothing new or modified since the last QC. Skipping. \n")
+  quit(status = 0)
+}
+cat("Files to check:", length(txt_files), "\n")
+
+run_stamp <- format(now(), "%Y-%m-%d_%H%M%S")
+qc_by_date <- file.path(
+  processed_path,
+  paste0("qc_performed_", run_stamp)
+)
+dir.create(qc_by_date, showWarnings = FALSE, recursive = TRUE)
 
 # Warn about missing directories
 missing_log_path <- file.path(qc_by_date,
                               "missing_files_and_folders.log")
-missing_txtpaths <- txtpaths[!dir.exists(txtpaths)]
 if (length(missing_txtpaths) > 0) {
   writeLines(c("===== Missing Directores =====",
                fs::path_file(missing_txtpaths)),
     missing_log_path
   )
 }
-
-# List and filter .txt files only from existing directories
-txt_files_all <- existing_txtpaths |>
-  purrr::map(~tryCatch(fs::dir_ls(.x, type = "file", glob = "*.txt"),
-                       error = function(e) character(0))) |>
-  unlist(use.names = FALSE)
-
-# Filter for wanted prefixes
-wanted_regex <- paste0("^(", paste(references$prefix, collapse = "|"),
-                       ")_.*\\.txt$")
-txt_files <- txt_files_all[stringr::str_detect(fs::path_file(txt_files_all),
-                                               wanted_regex)]
 ###########################
 # SINGLE-PASS PARALLEL QC #
 ###########################
@@ -172,8 +224,9 @@ all_results <- future_lapply(txt_files,
 # Update Reference Log (Vectorized)
 success_prefixes <- purrr::map_chr(keep(all_results, ~ .x$success), ~ .x$prefix)
 matches <- references$prefix %in% success_prefixes
-references$last_qc[matches] <- as.character(today)
+references$last_qc[matches] <- format(now())
 references$was_reviewed[matches] <- TRUE
+references$check_after <- NULL
 
 # Merge into the existing log instead of overwriting it.
 # An incremental run loads only the new rows (reference_new.tsv);
