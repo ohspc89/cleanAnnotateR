@@ -38,7 +38,7 @@
 
 # Don't forget to install tidyr and dplyr in people's computers...
 if (!requireNamespace("Require", quietly = T)) install.packages("Require")
-package_list = c('readxl', 'stringr', 'fs', 'tidyr', 'dplyr', 'here')
+package_list = c('readxl', 'rstudioapi','stringr', 'fs', 'tidyr', 'dplyr', 'here', 'lubridate')
 Require::Require(package_list, require=T, cranCache=T)
 
 # Settings
@@ -46,6 +46,19 @@ Require::Require(package_list, require=T, cranCache=T)
 EXCEL_FILE = "Reach_Assignments_2.xlsx"
 SHEET_NAME = "Coding_Assignments"
 # -----------------------------------------
+
+# Set working directory to the location of the current script
+if (rstudioapi::isAvailable()) {
+  script_path <- rstudioapi::getActiveDocumentContext()$path
+  if (nzchar(script_path)) {
+    setwd(dirname(script_path))
+    message("Working directory set to: ", getwd())
+  } else {
+    warning("No file is currently open in the editor.")
+  }
+} else {
+  warning("rstudioapi is not available in this environment.")
+}
 
 # (4/17/26) Using `here` package to find the top-level directory of your PROJECT,
 # regardless of the computer or OS.
@@ -100,7 +113,7 @@ month_tbl <- {
     # Use col_types to force columns to be numeric/double where needed
     # Column 1 is ID (text), the rest are activities (numeric)
 
-    dat <- read_excel(filepath, sheet=SHEET_NAME, skip=2)
+    dat <- read_excel(filepath, sheet=SHEET_NAME, skip=1)
 
     # Build final dataset
     out <- dat[, c(1, keep_idx)]
@@ -130,9 +143,11 @@ tab <- month_tbl %>%
     mutate(
            month = str_extract(combined, "M\\d+"),
            act = str_extract(combined, "A\\d+"),
-           prefix = paste0(ID, "-", month, "_", act),
+           prefix = paste0(ID, "-", month, act),
            path = file.path("Data", ID, paste0(ID, "_", month))
            )
+tab$last_appeared_on_sheet <- today()
+tab$was_reviewed <- FALSE
 
 # save the reference to a tab separated file
 # (1/20/26) Describing the path..
@@ -141,42 +156,42 @@ tab <- month_tbl %>%
 # |  |  |- Quality Check
 # |  |  |  |- R scripts (ex. fetch_ids.R)
 # |  |  |- processed
-# |  |  |  |- R script processed output (ex. reference.tsv)
+# |  |  |  |- R script processed output
 # |  |  |- Data
 # |  |  |  |- Coded data
-reference_path = file.path(dirname(here()), "processed/reference.tsv")
-qc_state_dir   = file.path(dirname(here()), "processed/qc_state")
+qc_state_dir   <- file.path(dirname(here()), "processed/qc_state")
 dir.create(qc_state_dir, showWarnings=FALSE, recursive=TRUE)
 
-prev_reference_path = file.path(qc_state_dir, "reference_prev.tsv")
-diff_new_path	    = file.path(qc_state_dir, "reference_new.tsv")
-diff_removed_path   = file.path(qc_state_dir, "reference_removed.tsv")
+review_log_path <- file.path(qc_state_dir, "reference_log.tsv")
+diff_new_path   <- file.path(qc_state_dir, "reference_new.tsv")
+diff_removed_path <- file.path(qc_state_dir, "reference_removed.tsv")
 
-# Load previous reference if exists
-prev <- NULL
-if (file.exists(prev_reference_path)) {
-    prev <- read.delim(prev_reference_path, sep="\t", stringsAsFactors=FALSE)
+# Load reference review log if exists;
+# else start with `tab`
+review <- NULL
+if (file.exists(review_log_path)) {
+    review <- read.delim(review_log_path, sep="\t", stringsAsFactors=FALSE)
 }
 
 # Compute diffs (use prefix as unique key)
-if (!is.null(prev) && "prefix" %in% names(prev)){
-    new_rows     <- tab[!(tab$prefix %in% prev$prefix), , drop=FALSE]
-    removed_rows <- prev[!(prev$prefix %in% tab$prefix), , drop=FALSE]
+if (!is.null(review) && "prefix" %in% names(review)){
+    new_rows     <- tab[!(tab$prefix %in% review$prefix), , drop=FALSE]
+#    removed_rows <- prev[!(review$prefix %in% tab$prefix), , drop=FALSE]
 } else {
     new_rows <- tab
-    removed_rows <- tab[0, , drop=FALSE]
+#    removed_rows <- tab[0, , drop=FALSE]
 }
 
 # Save diff outputs
 write.table(new_rows, file=diff_new_path, sep="\t",
 	    row.names=FALSE, col.names=TRUE, quote=FALSE)
-write.table(removed_rows, file=diff_removed_path, sep="\t",
-	    row.names=FALSE, col.names=TRUE, quote=FALSE)
+# write.table(removed_rows, file=diff_removed_path, sep="\t",
+#	    row.names=FALSE, col.names=TRUE, quote=FALSE)
 
 # Write the current reference (as before)
-write.table(tab, file=reference_path, sep="\t",
-	    row.names=FALSE, col.names=TRUE, quote=FALSE)
+# write.table(tab, file=reference_path, sep="\t",
+#             row.names=FALSE, col.names=TRUE, quote=FALSE)
 
 # Update snapshot for next run
-write.table(tab, file=prev_reference_path, sep= "\t",
-            row.names=F, col.names=T, quote=F)
+# write.table(tab, file=prev_reference_path, sep= "\t",
+#             row.names=F, col.names=T, quote=F)

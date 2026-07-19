@@ -36,358 +36,275 @@
 
 # An elegant way to install packages
 if (!(requireNamespace("Require", quietly = TRUE))) install.packages("Require")
-package_list = c('fs', 'stringr', 'purrr', 'dplyr', 'here', 'lubridate')
-Require::Require(package_list, require=T)
+package_list <- c("fs", "stringr", "purrr",
+                  "dplyr", "here", "lubridate", "future.apply")
+Require::Require(package_list, require = TRUE)
 
 # wake-up call (run if needed)
-# here::i_am('qc_project.Rproj')
+here::i_am("qc_project.Rproj")
 
 ################
 # PATH details #
 ################
 # This code should be sitting in '/Reach & Grasp/Quality Check' folder
-qc_files_path = here()
-processed_path = file.path(dirname(here()), 'processed')
+qc_files_path <- here()
+processed_path <- file.path(dirname(here()), "processed")
+qc_state_dir <- file.path(processed_path, "qc_state")
 
 # QC mode switch (0=incremental, 1=full)
 today <- today()
-first_day <- floor_date(today, unit="month")
-if (epiweek(today) == epiweek(first_day)) {
-    qc_full <- 1
-} else {
-    qc_full <- 0
-}
-
-# Base paths
-reference_path_full <- file.path(processed_path, "reference.tsv")
+first_day <- floor_date(today, unit = "month")
+# Find first Monday of the month (%% 7 keeps day 1 when it is already a Monday)
+first_monday <- first_day + days((8 - wday(first_day, week_start = 1)) %% 7)
+# Check if today is within that week (Mon-Fri)
+qc_full <- if (today >= first_monday && today <= first_monday + days(4)) 1 else 0
 
 # Prefer qc_state outputs for incremental
-qc_state_dir <- file.path(processed_path, "qc_state")
-reference_path_new_state <- file.path(qc_state_dir, "reference_new.tsv")
+ref_new <- file.path(qc_state_dir, "reference_new.tsv")
+ref_log <- file.path(qc_state_dir, "reference_log.tsv")
+reference_path <- if (qc_full == 1 && file.exists(ref_log)) ref_log else ref_new
 
-# Optional fallback
-reference_path_new_root <- file.path(processed_path, "reference_new.tsv")
-
-# Choose reference file
-reference_path <- if (qc_full) {
-    reference_path_full
-} else if (file.exists(reference_path_new_state)) {
-    reference_path_new_state
-} else if (file.exists(reference_path_new_root)) {
-    reference_path_new_root
-} else {
-    reference_path_full
-}
-
-cat("QC mode:", ifelse(qc_full, "FULL", "INCREMENTAL"), "\n")
 cat("Using reference file:", reference_path, "\n")
-
-if (!file.exists(reference_path)){
-    stop("Error: reference.tsv not found at: ",
-    "\n- ", reference_path_full,
-    "\n- ", reference_path_new_state,
-    "\n- ", reference_path_new_root,
-    "\nTip: Run fetch_ids.R first.")
+if (!file.exists(reference_path)) {
+  stop("Reference file not found. Run fetch_ids.R first.")
 }
-references = read.csv(reference_path, sep="\t")
+# This should be updated and saved as reference_log.tsv later
+references <- read.csv(reference_path, sep = "\t", stringsAsFactors = FALSE)
 
 # Quit if no new video coding output to review
 if (!qc_full && nrow(references) == 0) {
-    cat("No new assignments since last run. Skipping QC. \n")
-    quit(status=0)
+  cat("No new assignments since last run. Skipping QC. \n")
+  quit(status = 0)
 }
 
-run_stamp <- gsub(":", "", gsub(" ", "_", sub(".[0-9A-Za-z]+$", "", now())))
+run_stamp <- format(now(), "%Y-%m-%d_%H%M%S")
 qc_by_date <- file.path(
-    processed_path,
-    paste0("qc_performed_", run_stamp)
+  processed_path,
+  paste0("qc_performed_", run_stamp)
 )
-dir.create(qc_by_date, showWarnings=F, recursive=T)
-
-subdirs = unique(references$path)
+dir.create(qc_by_date, showWarnings = FALSE, recursive = TRUE)
 
 # You also need to load this R script to use functions I wrote.
-source(file.path(qc_files_path, 'qc_functions.R'))
+source(file.path(qc_files_path, "qc_functions.R"))
 
-# paths to .txt files
-# ex) /Users/joh/Library/.../Data/TD17/TD17_M3
-txtpaths = file.path(dirname(here()), subdirs)
-
-# Filter out paths that don't exist
+#########################
+# FILE GATHERING & LOGS #
+#########################
+subdirs <- unique(references$path)
+txtpaths <- file.path(dirname(here()), subdirs)
 existing_txtpaths <- txtpaths[dir.exists(txtpaths)]
 
 # Warn about missing directories
+missing_log_path <- file.path(qc_by_date,
+                              "missing_files_and_folders.log")
 missing_txtpaths <- txtpaths[!dir.exists(txtpaths)]
 if (length(missing_txtpaths) > 0) {
-  cat("Warning: Missing directories (skipped):\n")
-  print(missing_txtpaths)
-}
-if (length(missing_txtpaths) > 0) {
-    missing_txtpaths_log_path <- file.path(qc_by_date, 'missing_files_and_folders.log')
-    write.table(data.frame(fs::path_file(missing_txtpaths)),
-                file=missing_txtpaths_log_path,
-                sep=",",
-                row.names=FALSE,
-                col.names=FALSE
-    )
+  writeLines(c("===== Missing Directores =====",
+               fs::path_file(missing_txtpaths)),
+    missing_log_path
+  )
 }
 
 # List and filter .txt files only from existing directories
-files <- purrr::map(existing_txtpaths, function(p){
-    tryCatch(fs::dir_ls(p, type="file"), error=function(e) character(0))
-    }) |> unlist(use.names=FALSE)
-txt_files_all <- files[str_detect(files, "\\.txt$")]
+txt_files_all <- existing_txtpaths |>
+  purrr::map(~tryCatch(fs::dir_ls(.x, type = "file", glob = "*.txt"),
+                       error = function(e) character(0))) |>
+  unlist(use.names = FALSE)
 
-if (nrow(references) > 0 && "prefix" %in% names(references)) {
-    wanted <- paste0("^(", paste(references$prefix, collapse="|"), ")_.*\\.txt$")
-    txt_files <- txt_files_all[stringr::str_detect(fs::path_file(txt_files_all), wanted)]
-    expected_but_missing <- setdiff(references$prefix, str_extract(fs::path_file(txt_files), "TD[0-9][0-9]-M[0-9]A[0-9]"))
-}
+# Filter for wanted prefixes
+wanted_regex <- paste0("^(", paste(references$prefix, collapse = "|"),
+                       ")_.*\\.txt$")
+txt_files <- txt_files_all[stringr::str_detect(fs::path_file(txt_files_all),
+                                               wanted_regex)]
+###########################
+# SINGLE-PASS PARALLEL QC #
+###########################
+plan(multisession)
 
-# Check one more time...
-expected_but_missing_codes <- str_replace(expected_but_missing, "-", "_")
+process_qc <- function(txt, out_dir) {
+  # source(here::here("qc_functions.R"))
+  bn <- fs::path_file(txt)
+  prefix <- stringr::str_extract(bn, "TD\\d+-M\\d+A\\d+")
 
-if (length(missing_txtpaths) > 0){
-    noted <- paste0("^(", paste(fs::path_file(missing_txtpaths), collapse="|"), ")")
-    expected_but_missing_codes <- replaced[!str_detect(expected_but_missing_codes, noted)]
-}
+  result <- tryCatch({
+    out <- qc.all(txt)
 
-if (length(expected_but_missing) > 0) {
-    missing_txtpaths_log_path <- file.path(qc_by_date, 'missing_files_and_folders.log')
-    writeLines(paste0("\n===== Expected but missing ====="),
-		   con=missing_txtpaths_log_path, sep="\n", useBytes=T)
-
-    write.table(data.frame(expected_but_missing_codes),
-                file=missing_txtpaths_log_path,
-                sep=",",
-                row.names=FALSE,
-                col.names=FALSE,
-		    append=TRUE
-    )
-}
-
-unexpected_filenames = setdiff(txt_files_all, txt_files)
-
-if (length(unexpected_filenames) > 0) {
-    unexpected_filename_log_path = file.path(qc_by_date, 'unexpected_filenames.log')
-    write.table(data.frame(fs::path_file(unexpected_filenames)),
-                file=unexpected_filename_log_path,
-                sep=",",
-                row.names=FALSE,
-                col.names=FALSE
-    )
-}
-
-if (length(txt_files) == 0) {
-    message("No .txt files found; continuing to create empty outputs.")
-}
-
-summary_log_path = file.path(qc_by_date, 'quality_check_summary.log')
-failed_log_path = file.path(qc_by_date, 'failed_files.tsv')
-failed_log <- data.frame(
-    filename=character(),
-    error=character(),
-    timestamp=character(),
-    stringsAsFactors=FALSE
-)
-
-con <- file(summary_log_path, open="at", encoding="UTF-8")
-sink(con, split=FALSE)
-
-for (txt in txt_files){
-    print(tail(str_split(txt, '/')[[1]], 1))
-    bn <- fs::path_file(txt)
-    # Logging improved - ChatGPT recommendation
-    # Continue Processing even if one file fails
-    result = tryCatch({
-        qc.all(txt)
-    }, error = function(e) {
-        warning(sprintf("[QC ERROR] %s | %s", bn, conditionMessage(e)))
-        # Save structured info (`<<-`: super-assign)
-        failed_log <<- rbind(failed_log,
-                             data.frame(filename=txt, error=str_split(conditionMessage(e), '; ')[[1]][2],
-                                        stringsAsFactors=FALSE))
-        return(NULL)
-    })
-    if (!is.null(result)) print(result)
-}
-sink()
-close(con)
-
-write.csv(failed_log, failed_log_path, row.names=FALSE)
-
-successful_files = txt_files[!txt_files %in% failed_log$filename]
-
-offset_issue = character(0)
-cont_issue = matrix(NA, ncol=5)
-proper_issue = matrix(NA, ncol=3)
-
-for (txt in successful_files){
-    outlist = qc.all(txt)
-    # ex. TD13-M3_A3R2_CC.txt
-    key = fs::path_file(txt)
-    # If $last_offsets_match is FALSE, .txt filename is saved.
-    if (!(outlist$last_offsets_match))
-        offset_issue = c(offset_issue, key)
-    cont_check = outlist$continuously_coded
-    # Even if there's only one occasion of the mismatch,
-    # as long as it is not the info message,
-    # it will be processed.
-    if (!(length(cont_check) == 1 &&
-          cont_check == "No onset-offset mismatch found")){
-        # `msg` in the format (see qc_functions.R for more detail):
-        # "Tier: {\s}+; rows: [0-9]+\-[0-9]+; values differ: [0-9]+ vs. [0-9]+"
-        # Split `msg` by '; ' first -> have three parts
-        #   (1) "Tier: {\s}+"
-        #   (2) "rows: [0-9]+\-[0-9]+
-        #   (3) "values differ: [0-9]+ vs. [0-9]+"
-        # Split each of (1) and (2) by ': ' and save the second part
-        #   (1a) {\s}+              ex. "LA"
-        #   (2a) [0-9]+\-[0-9]+     ex. "19-20"
-        # Split (3) by ' vs. ' and save the two values
-        #   (3a) [0-9]+             ex. "59700"
-        #   (3b) [0-9]+             ex. "60640"
-        for (msg in cont_check){
-            bunch = str_split(msg, '; ')[[1]]
-            tier = str_split(bunch[1], ': ')[[1]][2]
-            rows = str_split(bunch[2], ': ')[[1]][2]
-            vs_vals = str_split(str_split(bunch[3], ': ')[[1]][2],
-                                ' vs. ')[[1]]
-            prev_value = vs_vals[1]
-            next_value = vs_vals[2]
-            cont_issue = rbind(cont_issue,
-                               c(key, tier, rows, prev_value, next_value))
-        }
+    # Immediate logging of specific issues to files
+    if (!out$last_offsets_match)
+      write(bn, file.path(out_dir, paste0(bn, "_offset_error.txt")))
+    if (!(length(out$continuously_coded) == 1 &&
+        out$continuously_coded == "No onset-offset mismatch found")) {
+      write.csv(out$continuously_coded,
+        file.path(out_dir,
+                  paste0(bn, "_cont_issues.csv")),
+        row.names = FALSE
+      )
     }
-    # If $proper_labels has one or more valid rows,
-    # save .txt filename, row number of a label, and the label
-    proper_check = outlist$proper_labels
-    n_p = nrow(proper_check)
-    if (n_p > 0){
-        for (j in 1:n_p){
-            proper_issue = rbind(proper_issue,
-                                 c(key,
-                                   as.numeric(row.names(proper_check[j,])),
-                                   proper_check[j, 1]))
-        }
+    if (nrow(out$proper_labels) > 0) {
+      write.csv(out$proper_labels,
+                file.path(out_dir, paste0(bn, "_label_issues.csv")),
+                row.names = FALSE)
     }
+    # Return a success list with the data you need later
+    list(success = TRUE,
+         filename = txt,
+         prefix = prefix,
+         key = bn,
+         data = out,
+         error = NULL)
+  }, error = function(e) {
+    err_msg <- stringr::str_split(conditionMessage(e), ";")[[1]]
+    list(success = FALSE,
+         filename = txt,
+         prefix = prefix,
+         key = bn,
+         data = NULL,
+         error = tail(err_msg, 1))
+  })
+  return(result)
 }
-# First rows are NA's. Remove them
-cont_issue = cont_issue[-1, ]
-proper_issue = proper_issue[-1, ]
 
-# (10/7/25) edge case - if removing first rows would leave you
-# with a 1-by-n vector, you need to transpose the character vector.
-# Added: `make.proper.dataframe` in qc_functions.R
-# Problem solved.
-
-# Convert matrices into data frames
-# so that we can have the columns named.
-lastoffset = data.frame(filename=offset_issue)
-write.table(lastoffset, file.path(qc_by_date, 'qc_offset.tsv'), sep='\t',
-            row.names=F, col.names=T, quote=F)
-continuous = make.proper.dataframe(cont_issue)
-colnames(continuous) = c('filename', 'tier', 'rows',
-                         'prev_value', 'next_value')
-write.table(continuous, file.path(qc_by_date, 'qc_continuous.tsv'), sep='\t',
-            row.names=F, col.names=T, quote=F)
-properlabels = make.proper.dataframe(proper_issue)
-colnames(properlabels) = c('filename', 'row', 'label')
-write.table(properlabels, file.path(qc_by_date, 'qc_labels.tsv'), sep='\t',
-            row.names=F, col.names=T, quote=F)
+all_results <- future_lapply(txt_files,
+                             process_qc,
+                             out_dir = qc_by_date)
 
 # ---- Summarize QC results by coder ----
+# Update Reference Log (Vectorized)
+success_prefixes <- purrr::map_chr(keep(all_results, ~ .x$success), ~ .x$prefix)
+matches <- references$prefix %in% success_prefixes
+references$last_qc[matches] <- as.character(today)
+references$was_reviewed[matches] <- TRUE
 
-# Helper: extract 2–3 uppercase letter coder ID right before ".txt"
+# Merge into the existing log instead of overwriting it.
+# An incremental run loads only the new rows (reference_new.tsv);
+# writing those alone to reference_log.tsv would erase the history,
+# and fetch_ids.R would then re-flag every old assignment as new.
+if (file.exists(ref_log)) {
+  ref_log_tab <- read.delim(ref_log, sep = "\t", stringsAsFactors = FALSE)
+  ref_log_tab <- dplyr::bind_rows(
+    ref_log_tab[!(ref_log_tab$prefix %in% references$prefix), , drop = FALSE],
+    references
+  )
+} else {
+  ref_log_tab <- references
+}
+write.table(ref_log_tab, ref_log, sep = "\t", row.names = FALSE, quote = FALSE)
+
+# Coder: extract 2-3 uppercase letter coder ID
 extract_coder <- function(x) {
-  # works for both full paths and basenames
   fname <- fs::path_file(x)
-  m <- str_match(fname, ".*_([A-Z]{2,3})\\.txt$")[, 2]
+  m <- stringr::str_match(fname, ".*_([A-Z]{2,3})\\.txt$")[, 2]
   # fallback: take the last token before .txt and strip non-letters
   ifelse(is.na(m),
-         str_replace(str_extract(fname, "[^_]+(?=\\.txt$)"), "[^A-Za-z]", ""),
+         stringr::str_replace(stringr::str_extract(fname, "[^_]+(?=\\.txt$)"),
+                              "[^A-Za-z]", ""),
          m)
 }
 
-# Normalize inputs defensively (in case any are missing/empty)
-if (!exists("failed_log"))
-    failed_log <- data.frame(filename=character(), error=character(), timestamp=character(), stringsAsFactors=FALSE)
-if (!exists("lastoffset"))
-    lastoffset <- data.frame(filename=character(), stringsAsFactors=FALSE)
-if (!exists("continuous"))
-    continuous <- data.frame(filename=character(), tier=character(), rows=character(), prev_value=character(), next_value=character(), stringsAsFactors=FALSE)
-if (!exists("properlabels"))
-    properlabels <- data.frame(filename=character(), row=character(), label=character(), stringsAsFactors=FALSE)
-
-# Add coder columns (leave frames empty if no rows)
-# Mutate unconditionally (2/24/26)
-add_coder_column <- function(df) {
-    coder_val <- if (nrow(df) > 0) extract_coder(df$filename) else NA_character_
-    df = dplyr::mutate(df, coder=coder_val)
-    return(df)
-}
-	
-failed_log_coded <- add_coder_column(failed_log)
-offset_with_coder <- add_coder_column(lastoffset)
-labels_with_coder <- add_coder_column(properlabels)
-continuous_with_coder <- add_coder_column(continuous)
-
-qc_by_coder_dir <- file.path(
-    qc_by_date, "qc_by_coder"
-)
-dir.create(qc_by_coder_dir, showWarnings=F, recursive=T)
-
-# Collect 'problematic coders'
-problem_coders <- sort(unique(na.omit(c(
-    failed_log_coded$coder,
-    offset_with_coder$coder,
-    labels_with_coder$coder,
-    continuous_with_coder$coder
-))))
-problem_coders <- problem_coders[problem_coders != ""]
-
 dump_section <- function(out_file, title, df){
-    writeLines(paste0("\n===== ", title, " ====="), con=out_file, sep="\n", useBytes=T)
+    writeLines(paste0("\n===== ", title, " ====="),
+               con = out_file,
+               sep = "\n",
+               useBytes = TRUE)
     if (is.null(df) || nrow(df) == 0){
-        writeLines("(none)\n", con=out_file, sep="\n", useBytes=T)
+        writeLines("(none)\n", con = out_file, sep = "\n", useBytes = TRUE)
     } else {
         # Write as TSV blocks inside the txt file
         write.table(df, file=out_file, sep="\t",
-                    row.names=F, col.names=T, quote=F)
-        writeLines("", con=out_file, useBytes=T)
+                    row.names = FALSE, col.names = TRUE, quote = FALSE)
+        writeLines("", con = out_file, useBytes = TRUE)
     }
 }
 
-safe_filter_by_coder <- function(df, cd) {
-  if (!"coder" %in% names(df)) {
-    # Return an empty df with the same columns
-    return(df[0, , drop = FALSE])
-  }
-  dplyr::filter(df, .data$coder == cd)
+# 1. Reconstruct the global data frames from the 'all_results' list
+success_data <- keep(all_results, ~ .x$success)
+
+offset_with_coder <- success_data |>
+  keep(~ !.x$data$last_offsets_match) |>
+  map_df(~ data.frame(filename = .x$key, coder = extract_coder(.x$key)))
+# If there's none, at least provide a coder column
+if (nrow(offset_with_coder) == 0) {
+  offset_with_coder <- data.frame(
+    filename = character(),
+    coder = character()
+  )
 }
 
+labels_with_coder <- success_data |>
+  map_df(~ {
+    df <- .x$data$proper_labels
+    if (nrow(df) > 0) {
+      df$filename <- .x$key
+      df$coder <- extract_coder(.x$key)
+    }
+    df
+  })
+if (nrow(labels_with_coder) == 0) {
+  labels_with_coder["filename"] = character()
+  labels_with_coder["coder"] = character()
+}
 
-if (length(problem_coders) == 0) {
-    message("No problematic coders found (no issues). Skipping per-coder dumps.")
+continuous_with_coder <- success_data |>
+  map_df(~ {
+    res <- .x$data$continuously_coded
+    if (!(length(res) == 1 && res == "No onset-offset mismatch found")) {
+      df <- as.data.frame(res)
+      df$filename <- .x$key
+      df$coder <- extract_coder(.x$key)
+      return(df)
+    }
+    return(data.frame(filename = character(),
+                      coder = character()))
+  })
+
+# Build the failed-file table from the parallel results so unreadable
+# files (e.g. cloud-only placeholders that failed to download) are
+# reported instead of dropped silently.
+failed_data <- keep(all_results, ~ !.x$success) |>
+  map_df(~ data.frame(filename = .x$filename, error = .x$error,
+                      stringsAsFactors = FALSE))
+if (nrow(failed_data) > 0) {
+  write.table(failed_data, file.path(qc_by_date, "failed_files.tsv"),
+              sep = "\t", row.names = FALSE, quote = FALSE)
+  failed_log_coded <- failed_data |> mutate(coder = extract_coder(filename))
 } else {
-    for (cd in problem_coders) {
-        out_file <- file.path(qc_by_coder_dir, paste0("qc_issues_", cd, ".txt"))
-        con <- file(out_file, open="at", encoding="UTF-8")
-        
-        # Start fresh each run
-        writeLines(
-            c(
-                paste0("QC issues for coder: ", cd),
-                paste0("Generated at: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
-                paste0("Processed path: ", processed_path)
-            ),
-            con=con, useBytes=T
-        )
-        dump_section(con, "failed_log_coded", safe_filter_by_coder(failed_log_coded, cd))
-        dump_section(con, "offset_with_coder", safe_filter_by_coder(offset_with_coder, cd))
-        dump_section(con, "labels_with_coder", safe_filter_by_coder(labels_with_coder, cd))
-        dump_section(con, "continuous_with_coder", safe_filter_by_coder(continuous_with_coder, cd))
-        close(con)
-    }
-    message("Wrote per-coder dumps to: ", qc_by_coder_dir)
+  failed_log_coded <- data.frame(filename = character(), error = character(),
+                                 coder = character())
 }
+
+# 2. Identify Problematic Coders
+problem_coders <- sort(unique(na.omit(c(
+  failed_log_coded$coder,
+  offset_with_coder$coder,
+  labels_with_coder$coder,
+  continuous_with_coder$coder
+))))
+problem_coders <- problem_coders[problem_coders != ""]
+
+# 3. Create Dumps
+qc_by_coder_dir <- file.path(qc_by_date, "qc_by_coder")
+dir.create(qc_by_coder_dir,
+           showWarnings = FALSE,
+           recursive = TRUE)
+
+if (length(problem_coders) > 0) {
+  for (cd in problem_coders) {
+    out_file <- file.path(qc_by_coder_dir, paste0("qc_issues_", cd, ".txt"))
+    con <- file(out_file, open="wt", encoding="UTF-8")
+
+    writeLines(c(
+      paste0("QC issues for coder: ", cd),
+      paste0("Generated at: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+      paste0("Processed path: ", processed_path)
+      ), con = con, useBytes = TRUE)
+
+    dump_section(con, "Failed Files (System Errors)", dplyr::filter(failed_log_coded, coder == cd))
+    dump_section(con, "Offset Issues", dplyr::filter(offset_with_coder, coder == cd))
+    dump_section(con, "Label Issues", dplyr::filter(labels_with_coder, coder == cd))
+    dump_section(con, "Continuous Coding Issues", dplyr::filter(continuous_with_coder, coder == cd))
+
+    close(con)
+  }
+}
+
+plan(sequential)

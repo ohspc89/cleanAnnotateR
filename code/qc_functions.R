@@ -102,24 +102,30 @@ qc.continuous = function(table){
         # `subset` will contain rows of a specific tier.
         subset = table[table$tier == tr, ]
 
-        # Iterate over rows. Indexing starts from 2, because
-        # the first row does not have a 'previous' row to compare.
-        # `dim()` returns the dimension of `subset`. The two numbers
-        # are the number of rows and the number of columns.
-        # By choosing the first ([1]) output of `dim(subset)`,
-        # we are getting the number of rows of `subset`.
-        for (i in 2:dim(subset)[1]){
-            prev_offset = subset[i-1, 'offset']
-            current_onset = subset[i, 'onset']
-            # If there's a mismatch, a message will be stored.
-            # The format of the message will be:
-            # 'Tier: {tier}; rows: {i}-{i+1}; values differ: {prev_offset} vs. {current_onset}'
-            if (prev_offset != current_onset){
-                continuous_log = c(continuous_log,
-                                   paste0('Tier: ', tr, '; rows: ', i-1,
-                                          '-', i, '; values differ: ',
-                                          prev_offset, ' vs. ',
-                                          current_onset))
+        # 2/21/26 - there are cases where only ONE row
+        # was recorded for a tier. Skip it
+        if (dim(subset)[1] == 1)
+            next
+        else{
+            # Iterate over rows. Indexing starts from 2, because
+            # the first row does not have a 'previous' row to compare.
+            # `dim()` returns the dimension of `subset`. The two numbers
+            # are the number of rows and the number of columns.
+            # By choosing the first ([1]) output of `dim(subset)`,
+            # we are getting the number of rows of `subset`.
+            for (i in 2:dim(subset)[1]){
+                prev_offset = subset[i-1, 'offset']
+                current_onset = subset[i, 'onset']
+                # If there's a mismatch, a message will be stored.
+                # The format of the message will be:
+                # 'Tier: {tier}; rows: {i}-{i+1}; values differ: {prev_offset} vs. {current_onset}'
+                if (prev_offset != current_onset){
+                    continuous_log = c(continuous_log,
+                                       paste0('Tier: ', tr, '; rows: ', i-1,
+                                              '->', i, '; values differ: ',
+                                              prev_offset, ' vs. ',
+                                              current_onset))
+                }
             }
         }
     }
@@ -193,10 +199,11 @@ qc.all = function(path){
                 'proper_labels'=labels_properly_formed))
 }
 
-# (10/7/25) Utility function to handle an edge case
+# (10/7/25) Utility function to handle the edge case
 make.proper.dataframe = function(vector){
-    # If a 1-by-n vector, transpose first, then make a dataframe.
+    # Ff a 1-by-n vector, transpose first, then make a dataframe.
     if (is.null(dim(vector)))
         return(data.frame(t(vector)))
     # If not, just return a plain dataframe.
     return(data.frame(vector))
+}
