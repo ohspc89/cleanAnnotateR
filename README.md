@@ -10,8 +10,11 @@ This project:
 - Validates annotation `.txt` files through **three structured quality checks**
 - Outputs detailed logs and `.tsv` summaries for further review
 - Coder-specific report generated inside `qc_by_coder/` folder
-- Identifies *newly* assigned videos since the last run
-  (full review at the first week of a month; incremental review the rest)
+- Incremental weekly runs: checks only files that are *new*, *never passed QC*,
+  or were *modified since their last successful QC* (re-uploaded corrections)
+- Full review runs automatically during the week of the month's first Monday,
+  or on demand: `Rscript perform_qc.R --full` (or `Sys.setenv(QC_FULL="1")`
+  before sourcing in RStudio)
 
 ---
 
