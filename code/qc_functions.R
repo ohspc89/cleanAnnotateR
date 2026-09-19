@@ -29,7 +29,8 @@ make.table = function(path){
     # |------|-----------|-------|--------|----------|-------|
     # | ...  | ...       | ...   | ...    | ...      | ...   |
     result = tryCatch({
-        table = read.table(path, stringsAsFactors = FALSE)
+        table = read.table(path, header = FALSE, stringsAsFactors = FALSE,
+                           comment.char = "", fill = FALSE, row.names = NULL)
         n = ncol(table)
         if (n == length(colnames5)) {
             colnames(table) <- colnames5
@@ -40,6 +41,7 @@ make.table = function(path){
         else {
             stop("Unexpected number of columns (", n, ") in file: ", path)
         }
+        validate.annotation(table)
         return(table)
     }, error=function(e) {
         stop("Error reading file ", path, "; ", conditionMessage(e))
@@ -157,7 +159,7 @@ qc.label = function(table){
     your_labels = table[, 'label']    # Get all labels
 
     # check if all labels are uppercase
-    all_upper = your_labels == toupper(your_labels)
+    all_upper = !is.na(your_labels) & your_labels == toupper(your_labels)
 
     # local function to check if `str` is a proper label
     if.proper = function(str){
@@ -170,7 +172,7 @@ qc.label = function(table){
     all_proper = sapply(your_labels, if.proper)
 
     # Combine the results to make one data frame.
-    out = data.frame('label'=your_labels,
+    out = data.frame('row'=seq_along(your_labels), 'label'=your_labels,
                      'UPPER'=all_upper,
                      'PROPER'=all_proper)
 
@@ -206,4 +208,53 @@ make.proper.dataframe = function(vector){
         return(data.frame(t(vector)))
     # If not, just return a plain dataframe.
     return(data.frame(vector))
+}
+
+# Reject malformed timing before comparing offsets or continuity.
+validate.annotation <- function(table) {
+    if (!nrow(table)) stop("Annotation file has no rows.")
+    if (anyNA(table$tier) || any(!nzchar(trimws(table$tier))))
+        stop("Missing tier at row(s): ", paste(which(is.na(table$tier) |
+             !nzchar(trimws(table$tier))), collapse = ", "))
+    for (column in c("onset", "offset", "duration")) {
+        values <- table[[column]]
+        if (!is.numeric(values)) stop(column, " must contain numeric times.")
+        bad <- which(!is.finite(values) | values < 0)
+        if (length(bad)) stop("Invalid ", column, " at row(s): ",
+                              paste(bad, collapse = ", "))
+    }
+    bad <- which(table$offset < table$onset)
+    if (length(bad)) stop("Offset precedes onset at row(s): ", paste(bad, collapse = ", "))
+    bad <- which(abs(table$duration - (table$offset - table$onset)) > 1e-7)
+    if (length(bad)) stop("Duration differs from offset - onset at row(s): ",
+                          paste(bad, collapse = ", "))
+    invisible(table)
+}
+
+# Stage in the same directory so rename is atomic. Never delete the old file
+# if replacement fails (for example, a workbook viewer holds the destination).
+atomic_write_tsv <- function(x, path) {
+    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+    staged <- tempfile(".qc-stage-", tmpdir = dirname(path))
+    on.exit(unlink(staged), add = TRUE)
+    old <- options(digits = 17)
+    on.exit(options(old), add = TRUE)
+    write.table(x, staged, sep = "\t", row.names = FALSE, quote = TRUE, na = "NA")
+    if (!file.rename(staged, path))
+        stop("Cannot atomically replace state file: ", path, ". Previous state retained.")
+    invisible(path)
+}
+
+read_state <- function(path) {
+    if (!file.exists(path)) return(NULL)
+    read.delim(path, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
+acquire_qc_lock <- function(state_dir) {
+    dir.create(state_dir, recursive = TRUE, showWarnings = FALSE)
+    lock <- file.path(state_dir, ".qc.lock")
+    if (!dir.create(lock, showWarnings = FALSE))
+        stop("QC state is locked: ", lock,
+             ". If a previous process crashed, remove this directory only after confirming it has stopped.")
+    lock
 }

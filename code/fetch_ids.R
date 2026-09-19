@@ -1,197 +1,83 @@
-#' Build Reference Table for Reach & Grasp Coding Video Anootations
-#'
-#' This script reads an Excel workbook with a two-row header that encodes
-#' months and activities (e.g., \code{M3} and \code{A2}) for each subject,
-#' identifies selected assignments (cells marked with \code{1}),
-#' and produces a tab-separated reference table with subject, month, activity,
-#' filename prefix, and target path. The output is written to the synchronized
-#' OneDrive/SharePoint "Behavior Coding" folder under
-#' \code{"Reach & Grasp/processed/reference.tsv"}.
-#'
-#' @section Inputs:
-#' \itemize{
-#'   \item \strong{Excel file} (default: \code{"Reach_Assignments_2.xlsx"}), located in the
-#'         OneDrive "Behavior Coding" folder. The name can be changed by editing
-#'         \code{EXCEL_FILE}.
-#'   \item \strong{Sheet name} (default: \code{"Coding_Assignments"}). Can be changed via
-#'         \code{SHEET_NAME}.
-#'   \item Row 1 contains merged month labels (e.g., \code{"Month 3 (M3)"}).
-#'         Row 2 contains activity codes as \code{"A#"} (e.g., \code{"A2"}).
-#'   \item Data rows begin at row 2 (after headers), where column 1 is \code{ID}
-#'         (e.g., \code{"TD17"}) and activity columns contain selection flags
-#'         (numeric \code{1}).
-#' }
-#'
-#' @section Outputs:
-#' A tab-separated file \code{reference.tsv} with the columns:
-#' \describe{
-#'   \item{subj}{Subject ID (e.g., \code{"TD17"}).}
-#'   \item{month}{Month tag (e.g., \code{"M3"}, \code{"M7"}).}
-#'   \item{act}{Activity tag (e.g., \code{"A2"}, \code{"A7"}).}
-#'   \item{prefix}{Filename prefix of the form \code{<ID>-<M#>_<A#>} (e.g., \code{"TD17-M3_A2"}).}
-#'   \item{path}{Target relative path (e.g., \code{"Data/TD17/TD17_M3"}).}
-#' }
-#'
-#' @author
-#' Maintainer: Jinseok Oh <joh@chla.usc.edu>
-#' Last edited: 2/21/2026
+# Extract the current Excel assignments and publish snapshots for QC.
+# Source with options(cleanAnnotateR.autorun = FALSE) to call fetch_ids() directly.
+fetch_ids <- function(filepath, project_dir, data_root = dirname(project_dir),
+                      sheet = "Coding_Assignments") {
+  required <- c("readxl", "stringr", "tidyr", "dplyr")
+  missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing)) stop("Install required packages: ", paste(missing, collapse = ", "))
+  source(file.path(project_dir, "qc_functions.R"), local = TRUE)
+  if (!file.exists(filepath)) stop("Excel file not found: ", filepath)
+  if (!sheet %in% readxl::excel_sheets(filepath)) stop("Sheet not found: ", sheet)
+  hdr <- readxl::read_excel(filepath, sheet = sheet,
+      range = readxl::cell_limits(c(1, 1), c(2, NA)),
+      col_names = FALSE, col_types = "text", .name_repair = "minimal")
+  row1 <- trimws(as.character(hdr[1, ]))
+  row2 <- trimws(as.character(hdr[2, ]))
+  row1[row1 == ""] <- NA_character_
+  month_header <- tidyr::fill(data.frame(val = row1), val)$val
+  month_tag <- stringr::str_extract(month_header, "M\\d+")
+  fallback <- stringr::str_extract(month_header, "(?<=Month )\\d+")
+  use_fallback <- is.na(month_tag) & !is.na(fallback)
+  month_tag[use_fallback] <- paste0("M", fallback[use_fallback])
+  activity <- !is.na(row2) & grepl("^A[0-9]+$", row2)
+  if (any(activity & is.na(month_tag))) stop("Activity header has no valid month.")
+  keep <- which(activity)
+  if (!length(keep)) stop("No activity columns found.")
+  headers <- paste0(month_tag[keep], row2[keep])
+  if (anyDuplicated(headers)) stop("Duplicate month/activity headers.")
 
-# Don't forget to install tidyr and dplyr in people's computers...
-if (!requireNamespace("Require", quietly = T)) install.packages("Require")
-package_list = c('readxl', 'rstudioapi','stringr', 'fs', 'tidyr', 'dplyr', 'here', 'lubridate')
-Require::Require(package_list, require=T, cranCache=T)
+  # Read from A3 explicitly, so leading blank cells cannot shift the columns.
+  dat <- readxl::read_excel(filepath, sheet = sheet,
+      range = readxl::cell_limits(c(3, 1), c(NA, ncol(hdr))),
+      col_names = FALSE, col_types = "text", .name_repair = "minimal")
+  out <- as.data.frame(dat[, c(1, keep)], stringsAsFactors = FALSE)
+  names(out) <- c("ID", headers)
+  out$ID <- trimws(out$ID)
+  out <- out[!is.na(out$ID) & nzchar(out$ID), , drop = FALSE]
+  if (any(!grepl("^TD[0-9]+$", out$ID))) stop("Invalid subject IDs in workbook.")
+  if (anyDuplicated(out$ID)) stop("Duplicate subject IDs in workbook.")
+  long <- tidyr::pivot_longer(out, cols = -ID, names_to = "combined", values_to = "flag")
+  long$flag <- trimws(long$flag)
+  # Blank and '-' mean unselected; do not parse arbitrary text as a number.
+  unusual <- !is.na(long$flag) & !long$flag %in% c("", "-", "0", "1")
+  issues <- as.data.frame(long[unusual, c("ID", "combined", "flag")])
+  selected <- long[!is.na(long$flag) & long$flag == "1", , drop = FALSE]
+  tab <- data.frame(ID = selected$ID, combined = selected$combined,
+                    status = rep(1, nrow(selected)),
+                    month = stringr::str_extract(selected$combined, "M\\d+"),
+                    act = stringr::str_extract(selected$combined, "A\\d+"))
+  tab$prefix <- if (nrow(tab)) paste0(tab$ID, "-", tab$month, tab$act) else character()
+  tab$path <- file.path("Data", tab$ID, paste0(tab$ID, "_", tab$month))
+  tab$last_appeared_on_sheet <- rep(as.character(Sys.Date()), nrow(tab))
+  tab$was_reviewed <- rep(FALSE, nrow(tab))
 
-# Settings
-# -----------------------------------------
-EXCEL_FILE = "Reach_Assignments_2.xlsx"
-SHEET_NAME = "Coding_Assignments"
-# -----------------------------------------
+  state_dir <- file.path(data_root, "processed", "qc_state")
+  lock <- acquire_qc_lock(state_dir)
+  on.exit(unlink(lock, recursive = TRUE), add = TRUE)
+  previous <- read_state(file.path(state_dir, "reference_current.tsv"))
+  if (is.null(previous)) previous <- read_state(file.path(state_dir, "reference_log.tsv"))
+  if (!is.null(previous) && !"prefix" %in% names(previous)) stop("Invalid previous reference snapshot.")
+  new <- tab[!tab$prefix %in% previous$prefix, , drop = FALSE]
+  removed <- if (is.null(previous)) tab[0, , drop = FALSE] else
+    previous[!previous$prefix %in% tab$prefix, , drop = FALSE]
+  atomic_write_tsv(issues, file.path(state_dir, "assignment_issues.tsv"))
+  atomic_write_tsv(new, file.path(state_dir, "reference_new.tsv"))
+  atomic_write_tsv(removed, file.path(state_dir, "reference_removed.tsv"))
+  # Commit the authoritative snapshot last. QC does not depend on the diff files.
+  atomic_write_tsv(tab, file.path(state_dir, "reference_current.tsv"))
+  message(nrow(tab), " selected assignments; ", nrow(issues), " unexpected flag(s).",
+          if (nrow(issues)) " See qc_state/assignment_issues.tsv." else "")
+  invisible(tab)
+}
 
-# Set working directory to the location of the current script
-if (rstudioapi::isAvailable()) {
-  script_path <- rstudioapi::getActiveDocumentContext()$path
-  if (nzchar(script_path)) {
-    setwd(dirname(script_path))
-    message("Working directory set to: ", getwd())
-  } else {
-    warning("No file is currently open in the editor.")
+if (!identical(getOption("cleanAnnotateR.autorun"), FALSE)) {
+  project_dir <- Sys.getenv("QC_PROJECT_DIR")
+  if (!nzchar(project_dir)) {
+    here::i_am("qc_project.Rproj")
+    project_dir <- here::here()
   }
-} else {
-  warning("rstudioapi is not available in this environment.")
+  fetch_ids(Sys.getenv("QC_EXCEL_PATH", file.path(dirname(dirname(project_dir)),
+                                                 "Reach_Assignments_2.xlsx")),
+            project_dir, data_root = Sys.getenv("QC_DATA_ROOT", dirname(project_dir)),
+            sheet = Sys.getenv("QC_SHEET", "Coding_Assignments"))
 }
-
-# (4/17/26) Using `here` package to find the top-level directory of your PROJECT,
-# regardless of the computer or OS.
-here::i_am("qc_project.Rproj")
-
-# -----------------------------------------
-
-# This will make the full file path
-filepath <- file.path(dirname(dirname(here())), EXCEL_FILE)
-
-if (!file.exists(filepath)){
-    stop("Error: Excel file not found at: ", filepath)
-}
-
-# Read from the spreadsheet: Coding_Assignments_2.xlsx
-month_tbl <- {
-    if (!SHEET_NAME %in% readxl::excel_sheets(filepath)) {
-        stop("Sheet '", SHEET_NAME, "' not found in: ", filepath)
-    }
-    # 1. Read the header rows (1 & 2) separately to build names (months + activities)
-    hdr <- read_excel(filepath, sheet=SHEET_NAME,
-                      range=readxl::cell_limits(c(1,1), c(2,NA)),
-                      col_names=FALSE)
-
-    row1 <- hdr[1, ] |> as.character()
-    row2 <- hdr[2, ] |> as.character()
-
-    # Treat empty strings as NA <- this necessary?
-    row1[row1 == ""] <- NA
-    row2[row2 == ""] <- NA
-
-    # Forward-fill the Month header across merged cells
-    month_header <- tibble(val=row1) |>
-        fill(val, .direction = "down") |>
-        pull(val)
-
-    # Expect either "M3", "M10" or labels like "Month 3", "Month 10"
-    month_tag <- str_extract(month_header, "M\\d+") %>%
-        ifelse(
-            is.na(.),
-            paste0("M", str_extract(month_header, "(?<=Month )\\d+")),
-            .
-        )
-
-    # Identify activity columns: those with A#, under a month
-    is_activity <- str_detect(row2, "^A\\d+$") & !is.na(month_tag)
-
-    keep_idx <- which(is_activity)
-    new_names <- paste0(month_tag[keep_idx], row2[keep_idx])
-
-    # 2. Read the actual data rows
-    # Use col_types to force columns to be numeric/double where needed
-    # Column 1 is ID (text), the rest are activities (numeric)
-
-    dat <- read_excel(filepath, sheet=SHEET_NAME, skip=1)
-
-    # Build final dataset
-    out <- dat[, c(1, keep_idx)]
-    names(out) <- c("ID", new_names)
-    # Reject rows without valid IDs
-    out <- out[!is.na(out$ID), ]
-    out <- out %>%
-        mutate(across(-ID, ~ readr::parse_number(as.character(.))))
-}
-
-#############################################
-# Data Wrangling:                           #
-#   - actual information extraction happens #
-#############################################
-
-# Reference table will have the following columns:
-#   - ID (chr; ex. TD02)
-#   - combined (chr; ex. M1A2)
-#   - status (dbl - 0, 1, or NA; if 1, coder marked the video to have been coded)
-#   - month (chr; ex. M1)
-#   - act (chr; ex. A2)
-#   - prefix (chr; ex. TD02-M1_A2)
-#   - path (chr; ex. Data/TD02/TD02_M1)
-tab <- month_tbl %>%
-    pivot_longer(cols = -ID, names_to = "combined", values_to = "status") %>%
-    filter(status == "1") %>%
-    mutate(
-           month = str_extract(combined, "M\\d+"),
-           act = str_extract(combined, "A\\d+"),
-           prefix = paste0(ID, "-", month, act),
-           path = file.path("Data", ID, paste0(ID, "_", month))
-           )
-tab$last_appeared_on_sheet <- today()
-tab$was_reviewed <- FALSE
-
-# save the reference to a tab separated file
-# (1/20/26) Describing the path..
-# |- onedrive_path
-# |  |- Reach & Grasp
-# |  |  |- Quality Check
-# |  |  |  |- R scripts (ex. fetch_ids.R)
-# |  |  |- processed
-# |  |  |  |- R script processed output
-# |  |  |- Data
-# |  |  |  |- Coded data
-qc_state_dir   <- file.path(dirname(here()), "processed/qc_state")
-dir.create(qc_state_dir, showWarnings=FALSE, recursive=TRUE)
-
-review_log_path <- file.path(qc_state_dir, "reference_log.tsv")
-diff_new_path   <- file.path(qc_state_dir, "reference_new.tsv")
-diff_removed_path <- file.path(qc_state_dir, "reference_removed.tsv")
-
-# Load reference review log if exists;
-# else start with `tab`
-review <- NULL
-if (file.exists(review_log_path)) {
-    review <- read.delim(review_log_path, sep="\t", stringsAsFactors=FALSE)
-}
-
-# Compute diffs (use prefix as unique key)
-if (!is.null(review) && "prefix" %in% names(review)){
-    new_rows     <- tab[!(tab$prefix %in% review$prefix), , drop=FALSE]
-#    removed_rows <- prev[!(review$prefix %in% tab$prefix), , drop=FALSE]
-} else {
-    new_rows <- tab
-#    removed_rows <- tab[0, , drop=FALSE]
-}
-
-# Save diff outputs
-write.table(new_rows, file=diff_new_path, sep="\t",
-	    row.names=FALSE, col.names=TRUE, quote=FALSE)
-# write.table(removed_rows, file=diff_removed_path, sep="\t",
-#	    row.names=FALSE, col.names=TRUE, quote=FALSE)
-
-# Write the current reference (as before)
-# write.table(tab, file=reference_path, sep="\t",
-#             row.names=FALSE, col.names=TRUE, quote=FALSE)
-
-# Update snapshot for next run
-# write.table(tab, file=prev_reference_path, sep= "\t",
-#             row.names=F, col.names=T, quote=F)

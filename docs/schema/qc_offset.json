@@ -1,7 +1,0 @@
-{
-    "filename": {
-        "description": "Name of the .txt file (ELAN coding output) that contains non-unique tier-specific last offsets",
-        "type": "string",
-        "example": "TD24-M3_A2R1_CC.txt"
-    }
-}
