@@ -121,6 +121,7 @@ Each run creates `processed/qc_performed_<timestamp>_<unique suffix>/`. Issue fi
 
 | File | Contents |
 |------|----------|
+| `qc_summary.tsv` | All discovered exports, including passing/skipped files, plus assignment and directory visibility issues |
 | `discovery_issues.tsv` | Missing directories, listing errors, assignments without exports, unmatched filenames, and previously recorded files now missing/inaccessible |
 | `per_file/Data/.../<filename>.txt_offset_error.txt` | File whose final offsets disagree |
 | `per_file/Data/.../<filename>.txt_cont_issues.csv` | Continuity messages with tier-relative row numbers |
@@ -128,7 +129,23 @@ Each run creates `processed/qc_performed_<timestamp>_<unique suffix>/`. Issue fi
 | `failed_files.tsv` | File paths and parsing, validation, or processing errors |
 | `qc_by_coder/qc_issues_<CODER>.txt` | Processing failures, offset issues, label issues, and continuity issues grouped by coder |
 
-Reports cover files checked in that run. Discovery issues are separate from coder reports because a missing or unmatched file may not identify a coder. QC violations and processing failures are recorded separately; both cause incremental retries.
+Open **`qc_summary.tsv` first** in Excel or another spreadsheet viewer. It includes `filename`, `path`, `prefix`, `coder`, `status`, `checked_this_run`, `last_qc`, `report_dir`, and `detail`. Unknown coder IDs are left blank/NA rather than guessed. `report_dir` refers to a folder under `processed/`; for skipped files it points to their previous check's reports.
+
+| Summary status | Meaning |
+|----------------|---------|
+| `passed` | Checked and passed this run |
+| `qc_issues` | Checked; offset, continuity, or label problems found |
+| `processing_failed` | Reading, validation, or processing failed; see `detail` |
+| `skipped_previous_pass` | Previously passed with unchanged metadata; not checked this run |
+| `unmatched` | Discovered file does not match a current assignment in that folder |
+| `missing_or_inaccessible` | A previously recorded file was not found during discovery |
+| `no_matching_file` | No matching export was found for the assignment in its assigned folder |
+| `directory_unavailable` | Assigned directory is not visible on this computer |
+| `listing_failed` | Reading the directory listing failed |
+
+`row_type` distinguishes `file`, `assignment`, and `directory` rows. An assignment gap and its unavailable directory can both appear, so the total row count is not a file count. File absence here does **not** prove that no upload occurred: the summary only covers the current assignment folders visible to this computer, without searching other folders or checking OneDrive upload history. A header-only summary is still written when there are no assignments or files.
+
+Detailed issue reports cover files checked in that run. Discovery issues are separate from coder reports because a missing or unmatched file may not identify a coder. QC violations and processing failures are recorded separately; both cause incremental retries.
 
 Generated `processed/` folders, `.tsv` files, `.log` files, and Excel workbooks are gitignored. Existing documents in `docs/schema/` may describe older output formats.
 

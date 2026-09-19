@@ -41,13 +41,27 @@ stopifnot(length(first$results) == 3, sum(first$state$processed_ok) == 2,
           identical(class(future::plan()), class(old_plan)) && future::nbrOfWorkers() == 1L)
 stopifnot(file.exists(file.path(first$report_dir, 'per_file', refs$path[1],
                                'TD01-M1A2R2_CC.txt_label_issues.csv')))
+stopifnot(nrow(first$summary) == 4L,
+          setequal(first$summary$status, c('passed', 'qc_issues', 'processing_failed', 'unmatched')),
+          !anyDuplicated(first$summary$path),
+          all(first$summary$checked_this_run[first$summary$status != 'unmatched']),
+          !first$summary$checked_this_run[first$summary$status == 'unmatched'],
+          grepl('invalid label', first$summary$detail[first$summary$status == 'qc_issues']))
+saved_summary <- read_state(file.path(first$report_dir, 'qc_summary.tsv'))
+stopifnot(nrow(saved_summary) == 4L, setequal(saved_summary$path, first$summary$path))
 second <- run_qc(project, root, full = FALSE, workers = 1)
+skipped <- second$summary[second$summary$status == 'skipped_previous_pass', ]
+stopifnot(nrow(skipped) == 1L, !skipped$checked_this_run,
+          skipped$report_dir == basename(first$report_dir),
+          skipped$last_qc == first$state$last_qc[first$state$qc_passed])
 stopifnot(length(second$results) == 2) # retry issues and processing failures, not clean sibling
 write_annotation(b)
 write_annotation(c)
 third <- run_qc(project, root, full = FALSE, workers = 2)
 stopifnot(length(third$results) == 2, all(third$state$qc_passed))
 fourth <- run_qc(project, root, full = FALSE, workers = 1)
+stopifnot(sum(fourth$summary$status == 'skipped_previous_pass') == 3L,
+          all(!fourth$summary$checked_this_run))
 stopifnot(length(fourth$results) == 0) # unchanged metadata survives TSV round trip
 # New files must be checked even if their upload preserves an old modification time.
 d <- write_annotation(file.path(root, refs$path[1], 'TD01-M1A2R3_CC.txt'))
@@ -58,6 +72,8 @@ unlink(a)
 sixth <- run_qc(project, root, full = FALSE, workers = 1)
 stopifnot(any(grepl('Previously recorded', sixth$discovery$issue)),
           !sixth$state$processed_ok[match(sub(paste0(root, '/'), '', a), sixth$state$path)])
+stopifnot(sum(sixth$summary$status == 'missing_or_inaccessible') == 1L,
+          !anyDuplicated(sixth$summary$path))
 # Changed files are detected even if size stays the same and mtime moves backwards.
 write_annotation(c, 'LA 0 10 10 mdx')
 Sys.setFileTime(c, as.POSIXct('2001-01-01', tz = 'UTC'))
@@ -70,8 +86,26 @@ refs <- rbind(refs, data.frame(prefix = c('TD02-M1A2', 'TD03-M1A2'),
 dir.create(file.path(root, refs$path[3]), recursive = TRUE)
 atomic_write_tsv(refs, file.path(state_dir, 'reference_current.tsv'))
 seventh <- run_qc(project, root, full = FALSE, workers = 1)
-stopifnot(any(grepl('Missing assigned directory', seventh$discovery$issue)),
+stopifnot(any(seventh$discovery$status == 'directory_unavailable'),
           sum(grepl('No matching annotation', seventh$discovery$issue)) == 2)
+stopifnot(sum(seventh$summary$status == 'no_matching_file') == 2L,
+          all(seventh$summary$row_type[seventh$summary$status == 'no_matching_file'] == 'assignment'))
+# A summary write failure must also prevent checkpoint updates.
+summary_before <- readBin(file.path(state_dir, 'file_log.tsv'), 'raw', n = 1e7)
+blocked_summary <- new.env(parent = globalenv())
+blocked_summary$source <- function(file, local, ...) {
+  target <- if (isTRUE(local)) parent.frame() else local
+  base::source(file, local = target, ...)
+  original <- target$atomic_write_tsv
+  target$atomic_write_tsv <- function(x, path) {
+    if (basename(path) == 'qc_summary.tsv') stop('simulated summary failure')
+    original(x, path)
+  }
+}
+summary_runner <- run_qc
+environment(summary_runner) <- blocked_summary
+expect_error(summary_runner(project, root, full = FALSE, workers = 1), 'simulated summary failure')
+stopifnot(identical(summary_before, readBin(file.path(state_dir, 'file_log.tsv'), 'raw', n = 1e7)))
 # Hold the shared lock: no concurrent run can overwrite state.
 lock <- acquire_qc_lock(state_dir)
 expect_error(run_qc(project, root, full = FALSE, workers = 1), 'locked')
@@ -97,7 +131,9 @@ stopifnot(length(new_full$results) == 1, new_full$results[[1]]$prefix == new_ref
 # Empty current assignments must not resurrect history or terminate the R session.
 atomic_write_tsv(refs[0, ], file.path(state_dir, 'reference_current.tsv'))
 empty <- run_qc(project, root, full = TRUE, workers = 1)
-stopifnot(length(empty$results) == 0)
+stopifnot(length(empty$results) == 0, nrow(empty$summary) == 0,
+          file.exists(file.path(empty$report_dir, 'qc_summary.tsv')),
+          'status' %in% names(read_state(file.path(empty$report_dir, 'qc_summary.tsv'))))
 # Exercise the public CLI entry point and explicit mode override.
 Sys.setenv(QC_PROJECT_DIR = project, QC_DATA_ROOT = root, QC_WORKERS = "1", QC_FULL = "1")
 cli <- system2(file.path(R.home('bin'), 'Rscript'),
