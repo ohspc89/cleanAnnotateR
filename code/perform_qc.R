@@ -82,9 +82,13 @@ discover_candidates <- function(data_root, references) {
   }
 
   for (exist in not_in_excel_exist) {
+    if (length(list.files(exist)) > 0)
+      message <- "Filled directory exists but is not listed in assignments"
+    else
+      message <- "Empty directory exists but is not listed in assignments"
     record_issue(
       clip_path(exist),
-      "Directory exists but is not listed in assignments",
+      message,
       "directory",
       "directory_unregistered"
     )
