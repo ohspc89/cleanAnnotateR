@@ -1,14 +1,205 @@
 # Run ELAN QC, publish reports, then commit per-file processing state.
 # Source with options(cleanAnnotateR.autorun = FALSE) to use run_qc() directly.
 
-run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
-                   workers = NULL) {
+# Discover eligible annotation exports and report assignment/directory issues.
+# This function does not read or modify the incremental QC state.
+discover_candidates <- function(data_root, references) {
+  discovery <- data.frame(
+    path = character(),
+    issue = character(),
+    row_type = character(),
+    status = character(),
+    prefix = character()
+  )
+  record_issue <- function(
+      path, issue, row_type, status, prefix = NA_character_) {
+    discovery <<- rbind(
+      discovery,
+      data.frame(
+        path = path,
+        issue = issue,
+        row_type = row_type,
+        status = status,
+        prefix = prefix
+      )
+    )
+  }
+  candidates <- data.frame(
+    path = character(),
+    prefix = character(),
+    size = double(),
+    mtime = character()
+  )
+
+  # Discover all existing subject/month directories.
+  data_dir <- file.path(data_root, "Data")
+
+  if (!dir.exists(data_dir))
+    stop("Data directory not accessible: ", data_dir)
+
+  all_entries <- list.files(
+    path = data_dir,
+    recursive = TRUE,
+    full.names = TRUE,
+    include.dirs = TRUE
+  )
+
+  existing_month_folders <- all_entries[
+    dir.exists(all_entries) &
+      grepl("^TD[0-9]+_M[0-9]$", basename(all_entries))
+  ]
+
+  existing_month_folders <- normalizePath(
+    existing_month_folders,
+    winslash = "/",
+    mustWork = TRUE
+  )
+
+  excel_marked_folders <- file.path(
+    data_root,
+    unique(references$path)
+  )
+
+  excel_marked_folders <- gsub("\\\\", "/", excel_marked_folders)
+
+  clip_path <- function(fullpath) {
+    fs::path_rel(fullpath, start = data_root)
+  }
+
+  # Marked in Excel, but not existing
+  in_excel_nonexist <- setdiff(excel_marked_folders, existing_month_folders)
+
+  # Exist, but not marked in Excel
+  not_in_excel_exist <- setdiff(existing_month_folders, excel_marked_folders)
+
+  for (nonexist in in_excel_nonexist) {
+    record_issue(
+      clip_path(nonexist),
+      "Assigned directory not visible on this computer",
+      "directory",
+      "directory_unavailable"
+    )
+  }
+
+  for (exist in not_in_excel_exist) {
+    record_issue(
+      clip_path(exist),
+      "Directory exists but is not listed in assignments",
+      "directory",
+      "directory_unregistered"
+    )
+  }
+
+  for (folder in existing_month_folders) {
+    subdir <- clip_path(folder)
+    info <- tryCatch(
+      fs::dir_info(
+        folder,
+        type = "file"
+      ),
+      error = function(e) {
+        record_issue(
+          subdir,
+          paste("Directory listing failed:", conditionMessage(e)),
+          "directory",
+          "listing_failed"
+        )
+        NULL
+      }
+    )
+    if (is.null(info))
+      next
+    info <- info[grepl("\\.txt$", info$path, ignore.case = TRUE), ]
+    for (j in seq_len(nrow(info))) {
+      bn <- basename(info$path[j])
+      rel <- paste(subdir, bn, sep = "/")
+
+      # 1. Validate the filename and extract the assignment prefix.
+      valid_pattern <- "^TD[0-9]+-M[1-7]A[0-9]+(R[0-9]+)?_[A-Z]{2,3}\\.txt$"
+
+      if (!grepl(valid_pattern, bn)) {
+        record_issue(
+          rel,
+          "Invalid annotation filename",
+          "file",
+          "invalid_filename"
+        )
+        next
+      }
+
+      # Extract assignment prefix.
+      prefix <- stringr::str_extract(bn, "^TD[0-9]+-M[1-7]A[0-9]+")
+
+      # 2. Check whether the file is in the expected directory.
+      subject <- stringr::str_extract(prefix, "^TD[0-9]+")
+      month <- stringr::str_extract(prefix, "M[1-7](?=A)")
+
+      expected_dir <- paste0(
+        "Data/", subject, "/", subject, "_", month
+      )
+
+      if (subdir != expected_dir) {
+        record_issue(
+          rel,
+          paste("Expected directory:", expected_dir),
+          "file",
+          "wrong_directory",
+          prefix
+        )
+        next
+      }
+
+      # 3. Check whether the assignment is registered in Excel.
+      if (!prefix %in% references$prefix) {
+        record_issue(
+          rel,
+          "Valid annotation file, but assignment not registered in Excel",
+          "file",
+          "unregistered_assignment",
+          prefix
+        )
+        next
+      }
+
+      # 4. Valid filename, correct directory, registered assignment
+      metadata <- file.info(info$path[j])
+
+      candidates <- rbind(
+        candidates,
+        data.frame(
+          path = rel,
+          prefix = prefix,
+          size = as.numeric(metadata$size),
+          mtime = sprintf("t%.6f", as.numeric(metadata$mtime))
+        )
+      )
+    }
+  }
+  for (i in which(!references$prefix %in% candidates$prefix)) {
+    record_issue(
+      paste(references$path[i], references$prefix[i], sep = "/"),
+      "No matching annotation files found in the assigned folder during this run",
+      "assignment",
+      "no_matching_file",
+      references$prefix[i]
+    )
+  }
+  list(candidates = candidates, issues = discovery)
+}
+
+run_qc <- function(project_dir, data_root = dirname(project_dir),
+                   full = NULL, workers = NULL) {
   required <- c("fs", "stringr", "purrr", "dplyr", "future.apply", "future")
-  missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(missing)) stop("Install required packages: ", paste(missing, collapse = ", "))
+  missing <- required[
+    !vapply(required, requireNamespace, logical(1), quietly = TRUE)
+  ]
+  if (length(missing))
+    stop("Install required packages: ", paste(missing, collapse = ", "))
+
   # Existing report helpers use these attached functions.
   suppressPackageStartupMessages(library(purrr))
   suppressPackageStartupMessages(library(dplyr))
+
   source(file.path(project_dir, "qc_functions.R"), local = TRUE)
   data_root <- normalizePath(data_root, winslash = "/", mustWork = TRUE)
   processed_path <- file.path(data_root, "processed")
@@ -23,165 +214,211 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
     full <- today >= monday && today <= monday + 4
     env <- Sys.getenv("QC_FULL")
     args <- commandArgs(trailingOnly = TRUE)
-    if (nzchar(env) && !env %in% c("0", "1")) stop("QC_FULL must be 0 or 1.")
-    if (nzchar(env)) full <- env == "1"
-    if (all(c("--full", "--incremental") %in% args)) stop("Choose only one QC mode.")
-    if ("--full" %in% args) full <- TRUE
-    if ("--incremental" %in% args) full <- FALSE
+    if (nzchar(env) && !env %in% c("0", "1"))
+      stop("QC_FULL must be 0 or 1.")
+    if (nzchar(env))
+      full <- env == "1"
+    if (all(c("--full", "--incremental") %in% args))
+      stop("Choose only one QC mode.")
+
+    if ("--full" %in% args)
+      full <- TRUE
+    if ("--incremental" %in% args)
+      full <- FALSE
   }
+
   if (length(full) != 1L || is.na(full) || !full %in% c(TRUE, FALSE))
     stop("full must be TRUE or FALSE.")
+
   cat("QC mode:", if (full) "FULL" else "INCREMENTAL", "\n")
 
   ref_log <- file.path(qc_state_dir, "reference_log.tsv")
   current <- read_state(file.path(qc_state_dir, "reference_current.tsv"))
   if (is.null(current)) {
     # Migrate old installations without trusting assignment-level timestamps.
-    current <- dplyr::bind_rows(read_state(file.path(qc_state_dir, "reference_new.tsv")),
-                                read_state(ref_log))
-    if (ncol(current)) current <- current[!duplicated(current$prefix), , drop = FALSE]
+    current <- dplyr::bind_rows(
+      read_state(file.path(qc_state_dir, "reference_new.tsv")),
+      read_state(ref_log)
+    )
+    if (ncol(current))
+      current <- current[!duplicated(current$prefix), , drop = FALSE]
+
   }
   if (!all(c("prefix", "path") %in% names(current)))
     stop("No valid reference snapshot. Run fetch_ids.R first.")
+
   references <- current
-  if (anyNA(references$prefix) || anyDuplicated(references$prefix) ||
-      anyNA(references$path) || any(!nzchar(references$path)))
+  if (anyNA(references$prefix) ||
+        anyDuplicated(references$prefix) ||
+        anyNA(references$path) ||
+        any(!nzchar(references$path))) {
     stop("Reference prefixes must be unique and paths must be nonempty.")
+  }
   if (any(!grepl("^TD[0-9]+-M[0-9]+A[0-9]+$", references$prefix)) ||
-      any(!grepl("^Data[/\\\\]TD[0-9]+[/\\\\]TD[0-9]+_M[0-9]+$", references$path)))
+      any(!grepl("^Data[/\\\\]TD[0-9]+[/\\\\]TD[0-9]+_M[0-9]+$", references$path))) {
     stop("Unexpected assignment prefix or relative data path.")
+  }
   references$path <- gsub("\\\\", "/", references$path)
 
   file_log <- file.path(qc_state_dir, "file_log.tsv")
   state <- read_state(file_log)
-  if (is.null(state)) state <- data.frame(path = character(), prefix = character(),
-      size = double(), mtime = character(), processed_ok = logical(), qc_passed = logical(),
-      last_qc = character(), report_dir = character())
-  if (!all(c("path", "prefix", "size", "mtime", "processed_ok", "qc_passed",
-             "last_qc", "report_dir") %in% names(state)) || anyDuplicated(state$path))
+  if (is.null(state)) {
+    state <- data.frame(
+      path = character(),
+      prefix = character(),
+      size = double(),
+      mtime = character(),
+      processed_ok = logical(),
+      qc_passed = logical(),
+      last_qc = character(),
+      report_dir = character()
+    )
+  }
+  expected <- c("path", "prefix", "size", "mtime",
+                "processed_ok", "qc_passed", "last_qc", "report_dir")
+  if (!all(expected %in% names(state)) ||
+        anyDuplicated(state$path)) {
     stop("Invalid per-file state log: ", file_log)
+  }
+  found <- discover_candidates(data_root, references)
+  candidates <- found$candidates
+  discovery <- found$issues
 
-  discovery <- data.frame(path = character(), issue = character(),
-                          row_type = character(), status = character(), prefix = character())
-  record_issue <- function(path, issue, row_type, status, prefix = NA_character_) {
-    discovery <<- rbind(discovery, data.frame(path = path, issue = issue,
-                        row_type = row_type, status = status, prefix = prefix))
-  }
-  candidates <- data.frame(path = character(), prefix = character(),
-                           size = double(), mtime = character())
-  for (subdir in unique(references$path)) {
-    folder <- file.path(data_root, subdir)
-    if (!dir.exists(folder)) {
-      record_issue(subdir, "Assigned directory not visible on this computer",
-                   "directory", "directory_unavailable")
-      next
-    }
-    info <- tryCatch(fs::dir_info(folder, type = "file"),
-                     error = function(e) {
-                       record_issue(subdir, paste("Directory listing failed:", conditionMessage(e)),
-                                    "directory", "listing_failed")
-                       NULL
-                     })
-    if (is.null(info)) next
-    info <- info[grepl("\\.txt$", info$path, ignore.case = TRUE), ]
-    for (j in seq_len(nrow(info))) {
-      bn <- basename(info$path[j])
-      prefix <- stringr::str_extract(bn, "^TD\\d+-M\\d+A\\d+(?=R\\d|_|\\.txt$)")
-      rel <- paste(subdir, bn, sep = "/")
-      if (is.na(prefix) || !any(references$prefix == prefix & references$path == subdir)) {
-        record_issue(rel, "Unmatched filename or assignment folder",
-                     "file", "unmatched", prefix)
-        next
-      }
-      metadata <- file.info(file.path(data_root, rel))
-      candidates <- rbind(candidates, data.frame(path = rel, prefix = prefix,
-                         size = as.numeric(metadata$size),
-                         mtime = sprintf("t%.6f", as.numeric(metadata$mtime))))
-    }
-  }
-  for (i in which(!references$prefix %in% candidates$prefix))
-    record_issue(paste(references$path[i], references$prefix[i], sep = "/"),
-                 "No matching annotation files found in the assigned folder during this run",
-                 "assignment", "no_matching_file", references$prefix[i])
   absent <- state$prefix %in% references$prefix & !state$path %in% candidates$path
-  for (i in which(absent & !state$path %in% discovery$path))
-    record_issue(state$path[i], "Previously recorded file is missing or inaccessible",
-                 "file", "missing_or_inaccessible", state$prefix[i])
+  for (i in which(absent & !state$path %in% discovery$path)) {
+    discovery <- rbind(
+      discovery,
+      data.frame(
+        path = state$path[i],
+        issue = "Previously recorded file is missing or inaccessible",
+        row_type = "file",
+        status = "missing or inaccessible",
+        prefix = state$prefix[i]
+      )
+    )
+  }
   state$processed_ok[absent] <- FALSE
   state$qc_passed[absent] <- FALSE
 
   previous <- match(candidates$path, state$path)
-  unchanged <- !is.na(previous) & state$processed_ok[previous] %in% TRUE &
+  unchanged <- !is.na(previous) &
+    state$processed_ok[previous] %in% TRUE &
     state$qc_passed[previous] %in% TRUE &
-    candidates$size == state$size[previous] & candidates$mtime == state$mtime[previous]
+    candidates$size == state$size[previous] &
+    candidates$mtime == state$mtime[previous]
   unchanged[is.na(unchanged)] <- FALSE
   selected <- candidates[full | !unchanged, , drop = FALSE]
   txt_files <- file.path(data_root, selected$path)
   cat("Files to check:", length(txt_files), "\n")
 
-  dir.create(processed_path, showWarnings = FALSE, recursive = TRUE)
+  fs::dir_create(processed_path, recurse = TRUE)
+
   # A unique suffix avoids collisions between runs started within one second.
-  qc_by_date <- tempfile(paste0("qc_performed_", format(Sys.time(), "%Y-%m-%d_%H%M%S"), "_"),
-                         tmpdir = processed_path)
-  if (!dir.create(qc_by_date)) stop("Cannot create report directory.")
+  qc_by_date <- tempfile(
+    paste0("qc_performed_", format(Sys.time(), "%Y-%m-%d_%H%M%S"), "_"),
+    tmpdir = processed_path
+  )
+  if (!dir.create(qc_by_date))
+    stop("Cannot create report directory.")
+
   old_options <- options(warn = 2)
   on.exit(options(old_options), add = TRUE)
-  if (nrow(discovery)) atomic_write_tsv(discovery, file.path(qc_by_date, "discovery_issues.tsv"))
+  if (nrow(discovery))
+    atomic_write_tsv(discovery, file.path(qc_by_date, "discovery_issues.tsv"))
 
   process_qc <- function(txt) {
-    tryCatch({
-      before <- file.info(txt)
-      out <- qc.all(txt)
-      after <- file.info(txt)
-      if (anyNA(c(before$size, after$size, before$mtime, after$mtime)) ||
-          before$size != after$size || before$mtime != after$mtime)
-        stop("File changed during QC; retry on the next run.")
-      passed <- isTRUE(out$last_offsets_match) &&
-        identical(out$continuously_coded, "No onset-offset mismatch found") &&
-        nrow(out$proper_labels) == 0L
-      list(success = TRUE, passed = passed, filename = txt, data = out,
-           size = as.numeric(before$size), mtime = sprintf("t%.6f", as.numeric(before$mtime)), error = NULL)
-    }, error = function(e) list(success = FALSE, passed = FALSE, filename = txt,
-                                data = NULL, error = conditionMessage(e)))
+    tryCatch(
+      {
+        before <- file.info(txt)
+        out <- qc.all(txt)
+        after <- file.info(txt)
+        if (anyNA(c(before$size, after$size, before$mtime, after$mtime)) ||
+              before$size != after$size || before$mtime != after$mtime) {
+          stop("File changed during QC; retry on the next run.")
+        }
+        passed <- isTRUE(out$last_offsets_match) &&
+          identical(out$continuously_coded, "No onset-offset mismatch found") &&
+          nrow(out$proper_labels) == 0L
+        list(
+          success = TRUE,
+          passed = passed,
+          filename = txt,
+          data = out,
+          size = as.numeric(before$size),
+          mtime = sprintf("t%.6f", as.numeric(before$mtime)),
+          error = NULL
+        )
+      },
+      error = function(e) {
+        list(
+          success = FALSE,
+          passed = FALSE,
+          filename = txt,
+          data = NULL,
+          error = conditionMessage(e)
+        )
+      }
+    )
   }
-  if (is.null(workers)) workers <- Sys.getenv("QC_WORKERS", "2")
+  if (is.null(workers))
+    workers <- Sys.getenv("QC_WORKERS", "2")
   workers <- suppressWarnings(as.numeric(workers))
-  if (length(workers) != 1L || !is.finite(workers) || workers < 1 || workers != floor(workers))
+  if (length(workers) != 1L ||
+        !is.finite(workers) ||
+        workers < 1 ||
+        workers != floor(workers)) {
     stop("QC_WORKERS must be a positive integer.")
+  }
+
   old_plan <- future::plan()
   on.exit(future::plan(old_plan), add = TRUE)
   if (workers == 1 || length(txt_files) < 2) {
     all_results <- lapply(txt_files, process_qc)
   } else {
-    future::plan(future::multisession, workers = min(workers, length(txt_files)))
-    all_results <- future.apply::future_lapply(txt_files, process_qc, future.seed = FALSE)
+    future::plan(
+      future::multisession, workers = min(workers, length(txt_files))
+    )
+    all_results <- future.apply::future_lapply(
+      txt_files, process_qc, future.seed = FALSE
+    )
   }
 
-  # Only the parent writes reports. Mirror input directories to avoid collisions.
+  # Only the parent writes reports.
+  # Mirror input directories to avoid collisions.
   for (i in seq_along(all_results)) {
     all_results[[i]]$prefix <- selected$prefix[i]
     all_results[[i]]$key <- selected$path[i]
     result <- all_results[[i]]
-    if (!result$success) next
+    if (!result$success)
+      next
     dest <- file.path(qc_by_date, "per_file", selected$path[i])
     dir.create(dirname(dest), recursive = TRUE, showWarnings = FALSE)
     if (!result$data$last_offsets_match)
       writeLines(selected$path[i], paste0(dest, "_offset_error.txt"))
     if (!identical(result$data$continuously_coded, "No onset-offset mismatch found"))
-      write.csv(result$data$continuously_coded, paste0(dest, "_cont_issues.csv"), row.names = FALSE)
+      write.csv(
+        result$data$continuously_coded,
+        paste0(dest, "_cont_issues.csv"),
+        row.names = FALSE
+      )
     if (nrow(result$data$proper_labels))
-      write.csv(result$data$proper_labels, paste0(dest, "_label_issues.csv"), row.names = FALSE)
+      write.csv(
+        result$data$proper_labels,
+        paste0(dest, "_label_issues.csv"),
+        row.names = FALSE
+      )
   }
-
   # Coder: extract 2-3 uppercase letter coder ID
   extract_coder <- function(x) {
     fname <- fs::path_file(x)
     m <- stringr::str_match(fname, ".*_([A-Z]{2,3})\\.txt$")[, 2]
     # fallback: take the last token before .txt and strip non-letters
-    ifelse(is.na(m),
-           stringr::str_replace(stringr::str_extract(fname, "[^_]+(?=\\.txt$)"),
-                                "[^A-Za-z]", ""),
-           m)
+    ifelse(
+      is.na(m),
+      stringr::str_replace(stringr::str_extract(fname, "[^_]+(?=\\.txt$)"),
+                           "[^A-Za-z]", ""),
+      m
+    )
   }
 
   dump_section <- function(out_file, title, df) {
@@ -193,12 +430,14 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
       writeLines("(none)\n", con = out_file, sep = "\n", useBytes = TRUE)
     } else {
       # Write as TSV blocks inside the txt file
-      write.table(df,
-                  file = out_file,
-                  sep = "\t",
-                  row.names = FALSE,
-                  col.names = TRUE,
-                  quote = FALSE)
+      write.table(
+        df,
+        file = out_file,
+        sep = "\t",
+        row.names = FALSE,
+        col.names = TRUE,
+        quote = FALSE
+      )
       writeLines("", con = out_file, useBytes = TRUE)
     }
   }
@@ -225,8 +464,14 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
       df
     })
   if (nrow(labels_with_coder) == 0) {
-    labels_with_coder <- data.frame(row = integer(), label = character(),
-      UPPER = logical(), PROPER = logical(), filename = character(), coder = character())
+    labels_with_coder <- data.frame(
+      row = integer(),
+      label = character(),
+      UPPER = logical(),
+      PROPER = logical(),
+      filename = character(),
+      coder = character()
+    )
   }
 
   continuous_with_coder <- success_data |>
@@ -243,7 +488,10 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
     })
 
   if (nrow(continuous_with_coder) == 0) {
-    continuous_with_coder <- data.frame(filename = character(), coder = character())
+    continuous_with_coder <- data.frame(
+      filename = character(),
+      coder = character()
+    )
   }
 
   # Build the failed-file table from the parallel results so unreadable
@@ -273,41 +521,51 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
 
   # 3. Create Dumps
   qc_by_coder_dir <- file.path(qc_by_date, "qc_by_coder")
-  dir.create(qc_by_coder_dir,
-             showWarnings = FALSE,
-             recursive = TRUE)
+  dir.create(qc_by_coder_dir, showWarnings = FALSE, recursive = TRUE)
 
   write_coder_report <- function(cd) {
-      out_file <- file.path(qc_by_coder_dir, paste0("qc_issues_", cd, ".txt"))
-      con <- file(out_file, open = "wt", encoding = "UTF-8")
-      on.exit(close(con), add = TRUE)
+    out_file <- file.path(qc_by_coder_dir, paste0("qc_issues_", cd, ".txt"))
+    con <- file(out_file, open = "wt", encoding = "UTF-8")
+    on.exit(close(con), add = TRUE)
 
-      writeLines(c(
-        paste0("QC issues for coder: ", cd),
+    writeLines(
+      c(paste0("QC issues for coder: ", cd),
         paste0("Generated at: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
         paste0("Processed path: ", processed_path)
-      ), con = con, useBytes = TRUE)
+      ),
+      con = con,
+      useBytes = TRUE
+    )
 
-      dump_section(con,
-                   "Failed Files (System Errors)",
-                   dplyr::filter(failed_log_coded, coder == cd))
-      dump_section(con,
-                   "Offset Issues",
-                   dplyr::filter(offset_with_coder, coder == cd))
-      dump_section(con,
-                   "Label Issues",
-                   dplyr::filter(labels_with_coder, coder == cd))
-      dump_section(con,
-                   "Continuous Coding Issues",
-                   dplyr::filter(continuous_with_coder, coder == cd))
-
+    dump_section(
+      con,
+      "Failed Files (System Errors)",
+      dplyr::filter(failed_log_coded, coder == cd)
+    )
+    dump_section(
+      con,
+      "Offset Issues",
+      dplyr::filter(offset_with_coder, coder == cd)
+    )
+    dump_section(
+      con,
+      "Label Issues",
+      dplyr::filter(labels_with_coder, coder == cd)
+    )
+    dump_section(
+      con,
+      "Continuous Coding Issues",
+      dplyr::filter(continuous_with_coder, coder == cd)
+    )
   }
+
   for (cd in problem_coders) write_coder_report(cd)
 
   # One file row per discovered export, including clean and skipped files.
   # Assignment/directory rows describe visibility gaps, not proof of no upload.
   checked_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS6Z", tz = "UTC")
-  summary <- data.frame(row_type = rep("file", nrow(candidates)),
+  summary <- data.frame(
+    row_type = rep("file", nrow(candidates)),
     path = candidates$path, filename = basename(candidates$path),
     prefix = candidates$prefix,
     coder = stringr::str_match(basename(candidates$path), "_([A-Z]{2,3})\\.txt$")[, 2],
@@ -315,8 +573,11 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
     checked_this_run = rep(FALSE, nrow(candidates)),
     last_qc = as.character(state$last_qc[previous]),
     report_dir = as.character(state$report_dir[previous]),
-    detail = rep("Previously passed; size and modification time unchanged. Not checked this run.",
-                 nrow(candidates)))
+    detail = rep(
+      "Previously passed; size and modification time unchanged. Not checked this run.",
+      nrow(candidates)
+    )
+  )
   for (i in seq_along(all_results)) {
     result <- all_results[[i]]
     row <- match(selected$path[i], summary$path)
@@ -341,15 +602,24 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
   if (nrow(discovery)) {
     is_file <- discovery$row_type == "file"
     known <- match(discovery$path, state$path)
-    summary <- rbind(summary, data.frame(row_type = discovery$row_type,
-      path = discovery$path,
-      filename = ifelse(is_file, basename(discovery$path), NA_character_),
-      prefix = discovery$prefix,
-      coder = ifelse(is_file,
-        stringr::str_match(basename(discovery$path), "_([A-Z]{2,3})\\.txt$")[, 2], NA_character_),
-      status = discovery$status, checked_this_run = FALSE,
-      last_qc = as.character(state$last_qc[known]),
-      report_dir = rep(basename(qc_by_date), nrow(discovery)), detail = discovery$issue))
+    summary <- rbind(
+      summary,
+      data.frame(
+        row_type = discovery$row_type,
+        path = discovery$path,
+        filename = ifelse(is_file, basename(discovery$path), NA_character_),
+        prefix = discovery$prefix,
+        coder = ifelse(
+          is_file,
+          stringr::str_match(basename(discovery$path), "_([A-Z]{2,3})\\.txt$")[, 2],
+          NA_character_
+        ),
+        status = discovery$status, checked_this_run = FALSE,
+        last_qc = as.character(state$last_qc[known]),
+        report_dir = rep(basename(qc_by_date), nrow(discovery)),
+        detail = discovery$issue
+      )
+    )
   }
   summary <- summary[order(summary$row_type, summary$path), , drop = FALSE]
   atomic_write_tsv(summary, file.path(qc_by_date, "qc_summary.tsv"))
@@ -357,11 +627,13 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
   # All reports, including the summary, are complete before state is committed.
   for (i in seq_along(all_results)) {
     result <- all_results[[i]]
-    row <- data.frame(path = selected$path[i], prefix = selected$prefix[i],
+    row <- data.frame(
+      path = selected$path[i], prefix = selected$prefix[i],
       size = if (result$success) result$size else selected$size[i],
       mtime = if (result$success) result$mtime else selected$mtime[i],
       processed_ok = result$success, qc_passed = result$passed,
-      last_qc = checked_at, report_dir = basename(qc_by_date))
+      last_qc = checked_at, report_dir = basename(qc_by_date)
+    )
     state <- rbind(state[state$path != row$path, , drop = FALSE], row)
   }
   references$was_reviewed <- vapply(references$prefix, function(prefix) {
@@ -374,17 +646,29 @@ run_qc <- function(project_dir, data_root = dirname(project_dir), full = NULL,
   }, logical(1))
   references$last_qc <- rep(checked_at, nrow(references))
   atomic_write_tsv(references, ref_log)
-  # This is the authoritative checkpoint; a failed commit causes safe rechecking.
+
+  # This is the authoritative checkpoint.
+  # A failed commit causes safe rechecking.
   atomic_write_tsv(state, file_log)
+
   cat("Summary:", file.path(qc_by_date, "qc_summary.tsv"), "\n")
   if (nrow(summary)) {
-    counts <- as.data.frame(table(status = summary$status), responseName = "rows")
+    counts <- as.data.frame(
+      table(status = summary$status),
+      responseName = "rows"
+    )
     print(counts, row.names = FALSE)
   }
   cat("Reports:", qc_by_date, "\n")
-  invisible(list(results = all_results, discovery = discovery, summary = summary, state = state,
-                 report_dir = qc_by_date))
+  invisible(
+    list(
+      results = all_results,
+      discovery = discovery, summary = summary, state = state,
+      report_dir = qc_by_date
+    )
+  )
 }
+
 
 if (!identical(getOption("cleanAnnotateR.autorun"), FALSE)) {
   project_dir <- Sys.getenv("QC_PROJECT_DIR")
@@ -392,5 +676,8 @@ if (!identical(getOption("cleanAnnotateR.autorun"), FALSE)) {
     here::i_am("qc_project.Rproj")
     project_dir <- here::here()
   }
-  run_qc(project_dir, data_root = Sys.getenv("QC_DATA_ROOT", dirname(project_dir)))
+  run_qc(
+    project_dir,
+    data_root = Sys.getenv("QC_DATA_ROOT", dirname(project_dir))
+  )
 }
