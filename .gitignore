@@ -4,6 +4,15 @@
 .RData
 .Ruserdata
 
+# Python-specific
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Prefect local state
+.prefect/
+
 # Output files
 processed/
 *.log

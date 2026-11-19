@@ -1,14 +1,54 @@
 # 🧹 cleanAnnotateR: ELAN Behavior Coding QC Pipeline
 
-An R pipeline for extracting Excel assignments, checking behavioral annotation exports from ELAN, and producing coder reports for infant motor control research at Children's Hospital Los Angeles (CHLA).
+An R-based quality-control pipeline for ELAN behavioral annotation exports, with Python/Prefect orchestration for scheduled execution and run monitoring. It reconciles Excel coding assignments with files on disk, performs annotation checks, and produces coder reports for infant motor control research at Children's Hospital Los Angeles (CHLA).
 
-## Workflow
+## Workflow orchestration with Prefect
 
-1. `code/fetch_ids.R` reads the current Excel assignments and saves a reference snapshot.
-2. `code/perform_qc.R` finds matching exports, checks selected files in parallel, writes reports, and then saves per-file QC state.
-3. Review the timestamped report folder, including discovery issues and coder reports. Fix annotation files and rerun.
+The R-based QC pipeline can be orchestrated using Python and Prefect. The orchestration layer coordinates execution, scheduling, and run monitoring without replacing the existing R validation and state-management logic.
 
-The scripts choose a QC mode based on the run date; they do not schedule runs.
+#### Execution sequence
+
+1. `fetch_ids.R` - Refresh the authoritative assignment snapshot from Excel.
+2. `perform_qc.R` - Discover annotation exports, reconcile assignments, execute QC, and publish reports.
+3. Prefect - Record task and flow execution states, durations, and failures.
+
+The second task runs only after the first completes successfully. A nonzero R process exit code causes the corresponding Prefect task to fail.
+
+### Local deployment
+
+Install the Python dependencies and start the Prefect server from the repository root:
+```sh
+uv sync
+uv run prefect server start
+```
+
+In a separate terminal, configure the local Prefect API and the directory containing the operational RStudio project:
+
+```sh
+export PREFECT_API_URL="http://127.0.0.1:4200/api"
+export QC_R_PROJECT_DIR="/path/to/OneDrive/Reach & Grasp/Quality Check"
+
+uv run python orchestration/flow.py
+```
+
+The deployment `cleanAnnotateR QC/local-qc` uses the cron expression `0 14 * * 1-5`, corresponding to 2:00 PM Monday–Friday in the `America/Los_Angeles` time zone.
+
+To trigger a run manually:
+
+```sh
+uv run prefect deployment run 'cleanAnnotateR QC/local-qc'
+```
+
+Open the Prefect UI at http://127.0.0.1:4200 to inspect deployment schedules, flow runs, task states, execution durations, and failures.
+
+### QC mode and operational requirements
+
+Prefect controls **when** the pipeline runs, while R determines **which QC mode** to use. When no mode override is supplied, R performs full QC during the first Monday-Friday period of each month and incremental QC on other days.
+
+Scheduled execution requires the Mac to remain awake, the Prefect server and serving process to remain running, and the OneDrive project files to be accessible. This is a local deployment, not an always-on cloud service.
+
+A completed Prefect flow indicates successful script execution; it does not mean every annotation passed QC. Annotation issues and processing failures are documented in the R-generated reports.
+
 
 ## Setup
 
@@ -84,7 +124,7 @@ The three QC checks are:
 2. **Continuity:** each row's offset must equal the next row's onset within its tier. Original row order is used; a single-row tier has no adjacent pair to check.
 3. **Labels:** allowed values are exactly `N`, `Z`, `Q`, `MO`, `MDT`, `MDG`, and `MDX`. Label reports include the original row number.
 
-Filenames must begin with an assignment prefix such as `TD17-M3A2`, followed by a repetition (`R1`, etc.), an underscore, or `.txt`. Files must be directly inside their assigned `Data/<ID>/<ID>_<month>/` folder. Unmatched filenames and files in the wrong assignment folder are reported. Coder IDs normally appear as two or three uppercase letters after the last underscore and before `.txt`.
+Annotation filenames must follow `TD<ID>-M<month>A<activity>[R<repetition>]_<CODER>.txt`, where the repetition suffix is optional, the month is M1–M7, and the coder ID consists of two or three uppercase letters. For example, `TD17-M3A2R2_CC.txt` and `TD17-M3A2_CC.txt` are valid names. Files must reside directly in the corresponding `Data/<ID>/<ID>_M<month>/` directory. Discovery reports invalid filenames, files placed in the wrong subject/month directory, and files with valid names whose assignment prefixes are absent from the current Excel snapshot. Only correctly located files with registered assignments are eligible for annotation QC.
 
 The pipeline cannot infer which tiers or repetitions should exist from the current workbook. It reports assignments with no matching files and previously recorded files that disappear, but does not prove that every expected repetition or tier was exported.
 
@@ -121,8 +161,8 @@ Each run creates `processed/qc_performed_<timestamp>_<unique suffix>/`. Issue fi
 
 | File | Contents |
 |------|----------|
-| `qc_summary.tsv` | All discovered exports, including passing/skipped files, plus assignment and directory visibility issues |
-| `discovery_issues.tsv` | Missing directories, listing errors, assignments without exports, unmatched filenames, and previously recorded files now missing/inaccessible |
+| `qc_summary.tsv` | Eligible annotation exports (including passing/skipped files) and file, assignment, and directory discovery issues |
+| `discovery_issues.tsv` | Unregistered or unavailable directories, listing errors, invalid filenames, wrong-directory files, unregistered assignments, assignments without matching exports, and previously recorded files now missing/inaccessible |
 | `per_file/Data/.../<filename>.txt_offset_error.txt` | File whose final offsets disagree |
 | `per_file/Data/.../<filename>.txt_cont_issues.csv` | Continuity messages with tier-relative row numbers |
 | `per_file/Data/.../<filename>.txt_label_issues.csv` | `row`, `label`, `UPPER`, and `PROPER` columns |
@@ -137,15 +177,18 @@ Open **`qc_summary.tsv` first** in Excel or another spreadsheet viewer. It inclu
 | `qc_issues` | Checked; offset, continuity, or label problems found |
 | `processing_failed` | Reading, validation, or processing failed; see `detail` |
 | `skipped_previous_pass` | Previously passed with unchanged metadata; not checked this run |
-| `unmatched` | Discovered file does not match a current assignment in that folder |
+| `invalid_filename` | Discovered `.txt` file does not follow the required annotation filename convention |
+| `wrong_directory` | Filename identifies a subject/month different from the directory containing the file |
+| `unregistered_assignment` | Validly named file in the expected directory, but its assignment prefix is absent from the Excel snapshot |
+| `directory_unregistered` | Subject/month directory exists but is not listed among current assignment directories |
 | `missing_or_inaccessible` | A previously recorded file was not found during discovery |
 | `no_matching_file` | No matching export was found for the assignment in its assigned folder |
 | `directory_unavailable` | Assigned directory is not visible on this computer |
 | `listing_failed` | Reading the directory listing failed |
 
-`row_type` distinguishes `file`, `assignment`, and `directory` rows. An assignment gap and its unavailable directory can both appear, so the total row count is not a file count. File absence here does **not** prove that no upload occurred: the summary only covers the current assignment folders visible to this computer, without searching other folders or checking OneDrive upload history. A header-only summary is still written when there are no assignments or files.
+`row_type` distinguishes `file`, `assignment`, and `directory` rows. An assignment gap and its unavailable directory can both appear, so the total row count is not a file count. File absence here does **not** prove that no upload occurred: discovery examines recognized subject/month directories under the local `Data/` tree, but does not inspect arbitrary locations or OneDrive upload history. A header-only summary is still written when there are no assignments or files.
 
-Detailed issue reports cover files checked in that run. Discovery issues are separate from coder reports because a missing or unmatched file may not identify a coder. QC violations and processing failures are recorded separately; both cause incremental retries.
+Detailed issue reports cover files checked in that run. Discovery issues are separate from coder reports because a missing, invalid, or unregistered file may not identify a coder. QC violations and processing failures are recorded separately; both cause incremental retries.
 
 Generated `processed/` folders, `.tsv` files, `.log` files, and Excel workbooks are gitignored. Existing documents in `docs/schema/` may describe older output formats.
 
@@ -161,7 +204,7 @@ Tests use temporary files and state, including real parallel workers. If the wor
 
 ## Research context and author
 
-Developed as part of an NIH-funded project at Children's Hospital Los Angeles for infant reach-and-grasp research using sensorimotor and EEG measurements.
+Developed as part of an NIH-funded project at Children's Hospital Los Angeles for infant reach-and-grasp research using behavioral coding and EEG measurements.
 
 **Jinseok Oh**, Postdoctoral Research Fellow @ CHLA
 

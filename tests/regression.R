@@ -42,10 +42,10 @@ stopifnot(length(first$results) == 3, sum(first$state$processed_ok) == 2,
 stopifnot(file.exists(file.path(first$report_dir, 'per_file', refs$path[1],
                                'TD01-M1A2R2_CC.txt_label_issues.csv')))
 stopifnot(nrow(first$summary) == 4L,
-          setequal(first$summary$status, c('passed', 'qc_issues', 'processing_failed', 'unmatched')),
+          setequal(first$summary$status, c('passed', 'qc_issues', 'processing_failed', 'invalid_filename')),
           !anyDuplicated(first$summary$path),
-          all(first$summary$checked_this_run[first$summary$status != 'unmatched']),
-          !first$summary$checked_this_run[first$summary$status == 'unmatched'],
+          all(first$summary$checked_this_run[first$summary$status != 'invalid_filename']),
+          !first$summary$checked_this_run[first$summary$status == 'invalid_filename'],
           grepl('invalid label', first$summary$detail[first$summary$status == 'qc_issues']))
 saved_summary <- read_state(file.path(first$report_dir, 'qc_summary.tsv'))
 stopifnot(nrow(saved_summary) == 4L, setequal(saved_summary$path, first$summary$path))
@@ -72,7 +72,7 @@ unlink(a)
 sixth <- run_qc(project, root, full = FALSE, workers = 1)
 stopifnot(any(grepl('Previously recorded', sixth$discovery$issue)),
           !sixth$state$processed_ok[match(sub(paste0(root, '/'), '', a), sixth$state$path)])
-stopifnot(sum(sixth$summary$status == 'missing_or_inaccessible') == 1L,
+stopifnot(sum(sixth$summary$status == 'missing or inaccessible') == 1L,
           !anyDuplicated(sixth$summary$path))
 # Changed files are detected even if size stays the same and mtime moves backwards.
 write_annotation(c, 'LA 0 10 10 mdx')
@@ -131,9 +131,44 @@ stopifnot(length(new_full$results) == 1, new_full$results[[1]]$prefix == new_ref
 # Empty current assignments must not resurrect history or terminate the R session.
 atomic_write_tsv(refs[0, ], file.path(state_dir, 'reference_current.tsv'))
 empty <- run_qc(project, root, full = TRUE, workers = 1)
-stopifnot(length(empty$results) == 0, nrow(empty$summary) == 0,
+stopifnot(length(empty$results) == 0,
+          nrow(empty$summary) == nrow(empty$discovery),
+          all(empty$summary$status %in% c('directory_unregistered', 'invalid_filename',
+                                           'unregistered_assignment', 'wrong_directory')),
           file.exists(file.path(empty$report_dir, 'qc_summary.tsv')),
           'status' %in% names(read_state(file.path(empty$report_dir, 'qc_summary.tsv'))))
+# Discovery-only checks: optional repetition, filename validation, directory
+# reconciliation, and assignments absent from the Excel snapshot.
+discovery_root <- tempfile('qc-discovery-')
+dir.create(discovery_root)
+# Resolve macOS /var -> /private/var before comparing absolute paths.
+discovery_root <- normalizePath(discovery_root, winslash = '/', mustWork = TRUE)
+discovery_refs <- data.frame(
+  prefix = c('TD10-M3A2', 'TD10-M3A3'),
+  path = rep('Data/TD10/TD10_M3', 2)
+)
+folder <- file.path(discovery_root, 'Data/TD10/TD10_M3')
+write_annotation(file.path(folder, 'TD10-M3A2_CC.txt'))       # No R suffix
+write_annotation(file.path(folder, 'TD10-M3A2R2_CC.txt'))     # Optional R suffix
+write_annotation(file.path(folder, 'TD10-M3A4_CC.txt'))       # Not in Excel
+write_annotation(file.path(folder, 'backup_TD10-M3A2_CC.txt'))
+write_annotation(file.path(folder, 'TD10-M4A2_CC.txt'))       # Wrong month folder
+write_annotation(file.path(folder, 'TD10-M3A2R_CC.txt'))      # Invalid R suffix
+other_folder <- file.path(discovery_root, 'Data/TD11/TD11_M3')
+write_annotation(file.path(other_folder, 'TD11-M3A2_CC.txt')) # Unregistered directory
+found <- discover_candidates(discovery_root, discovery_refs)
+stopifnot(
+  setequal(basename(found$candidates$path),
+           c('TD10-M3A2_CC.txt', 'TD10-M3A2R2_CC.txt')),
+  all(found$candidates$prefix == 'TD10-M3A2'),
+  sum(found$issues$status == 'invalid_filename') == 2L,
+  sum(found$issues$status == 'wrong_directory') == 1L,
+  sum(found$issues$status == 'unregistered_assignment') == 2L,
+  sum(found$issues$status == 'directory_unregistered') == 1L,
+  sum(found$issues$status == 'no_matching_file') == 1L,
+  any(found$issues$prefix[found$issues$status == 'no_matching_file'] == 'TD10-M3A3')
+)
+unlink(discovery_root, recursive = TRUE)
 # Exercise the public CLI entry point and explicit mode override.
 Sys.setenv(QC_PROJECT_DIR = project, QC_DATA_ROOT = root, QC_WORKERS = "1", QC_FULL = "1")
 cli <- system2(file.path(R.home('bin'), 'Rscript'),
